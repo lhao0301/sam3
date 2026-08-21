@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM3 视频标注系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v=16">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <div class="brand">
+                <span class="brand-dot"></span>
+                <h1>SAM3 视频标注</h1>
+            </div>
+            <div id="status-bar">
+                <span id="video-info" class="status-pill" hidden></span>
+                <span id="gpu-status" class="status-pill">GPU: --</span>
+                <span id="session-status" class="status-pill">会话: 无</span>
+            </div>
+        </header>
+
+        <!-- Top toolbar: upload / encode / prompt / propagate (single row) -->
+        <div id="toolbar">
+            <!-- Upload: one click = pick file, upload, and start session -->
+            <div class="tool-group" id="panel-upload">
+                <input type="file" id="video-file-input" accept="video/*" hidden>
+                <label id="btn-upload" class="btn btn-primary file-label tip-left" for="video-file-input" data-tip="选择视频文件，自动上传并启动 SAM3 会话">⬆ 上传视频</label>
+                <span id="upload-status" class="status-text"></span>
+            </div>
+
+            <!-- Feature encoding -->
+            <div class="tool-group" id="panel-encode">
+                <button id="btn-encode" type="button" class="btn" disabled data-tip="预计算 ViT backbone 特征；编码后更改提示无需重新编码，加速响应">⚡ 编码</button>
+                <span id="encode-status" class="status-text"></span>
+            </div>
+
+            <!-- Prompt annotation: text input + point+/point-/box tools -->
+            <div class="tool-group grow" id="panel-prompt">
+                <input type="text" id="text-prompt-input" placeholder="请输入prompt" title="文本提示：开放词表检测，可能检出多个实例（id 自动分配）">
+
+                <!-- Prompt tools (mutually exclusive; active one is highlighted) -->
+                <div class="btn-row">
+                    <button id="btn-point-positive" type="button" class="btn btn-sq" data-tip="正样本点：在画面上点击，标记目标所在位置">＋</button>
+                    <button id="btn-point-negative" type="button" class="btn btn-sq" data-tip="负样本点：在画面上点击，排除误检区域">−</button>
+                    <button id="btn-box-tool" type="button" class="btn btn-sq active" data-tip="框提示：在画面上拖拽画框锁定目标，新框替换旧框">□</button>
+                </div>
+
+                <!-- Point utilities -->
+                <div class="btn-row">
+                    <button id="btn-undo-point" type="button" class="btn btn-sq" data-tip="撤销最近一次点击的点">↩</button>
+                    <button id="btn-clear-points" type="button" class="btn btn-sq" data-tip="清空所有提示（点 / 框）">⌫</button>
+                </div>
+
+                <div class="confirm-row">
+                    <input type="text" id="class-name-input" placeholder="类别名" title="类别名（class name）">
+                    <input type="number" id="tracklet-id-input" min="0" step="1" title="tracklet id（仅点模式，SAM3 检测类提示 id 自动分配）" hidden>
+                </div>
+                <button id="btn-segment-preview" type="button" class="btn" disabled data-tip="运行 SAM3 分割并预览掩码（不生成 tracklet）">预览</button>
+                <button id="btn-confirm-prompt" type="button" class="btn btn-success" disabled data-tip="确认当前提示，生成 tracklet 并加入目标列表">✓ 确认</button>
+                <button id="btn-undo-prompt" type="button" class="btn btn-danger" disabled data-tip="撤销最近一个已确认的 tracklet">↩ 撤销</button>
+                <span id="prompt-status" class="status-text"></span>
+            </div>
+
+            <!-- Propagate -->
+            <div class="tool-group" id="panel-propagate">
+                <select id="propagation-direction" title="跟踪传播方向">
+                    <option value="both" selected>双向</option>
+                    <option value="forward">前向</option>
+                    <option value="backward">后向</option>
+                </select>
+                <button id="btn-propagate" type="button" class="btn btn-success" disabled data-tip="将已确认的目标传播跟踪到整个视频">开始跟踪</button>
+                <button id="btn-cancel" type="button" class="btn btn-danger" disabled data-tip="取消正在进行的跟踪任务">取消</button>
+                <div class="prop-progress">
+                    <div id="propagation-progress" class="progress-bar">
+                        <div id="progress-fill" class="progress-fill"></div>
+                    </div>
+                    <span id="progress-text">0 / 0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main content area -->
+        <main id="main-content">
+            <!-- Left sidebar: tracklet list -->
+            <aside id="result-sidebar">
+                <section class="panel">
+                    <h2>目标列表</h2>
+                    <div id="result-info">
+                        <p class="hint">分割确认后的 tracklet 将在此显示。</p>
+                    </div>
+                    <div id="tracklet-list" class="tracklet-list"></div>
+                </section>
+            </aside>
+
+            <!-- Center: canvas viewport -->
+            <section id="viewport">
+                <div id="canvas-container">
+                    <canvas id="frame-canvas" width="0" height="0"></canvas>
+                    <canvas id="overlay-canvas" width="0" height="0"></canvas>
+                    <canvas id="draw-canvas" width="0" height="0"></canvas>
+                </div>
+                <div id="viewport-empty">
+                    <p>上传视频并启动会话后，视频帧将在此处显示。</p>
+                </div>
+            </section>
+        </main>
+
+        <!-- Bottom: frame navigation (inner width tracks the video width) -->
+        <footer id="bottom-nav">
+            <div id="nav-inner">
+                <div class="nav-controls">
+                    <button id="btn-prev-frame" type="button" class="btn btn-icon" disabled title="上一帧 (&larr;)">&#8249;</button>
+                    <button id="btn-play" type="button" class="btn-play" disabled title="播放 / 暂停 (空格)">&#9654;</button>
+                    <button id="btn-next-frame" type="button" class="btn btn-icon" disabled title="下一帧 (&rarr;)">&#8250;</button>
+                    <span class="nav-frame-label">帧 <span id="frame-index-label">0</span> / <span id="frame-total-label">0</span></span>
+                    <input type="range" id="frame-slider" min="0" max="0" value="0" disabled>
+                </div>
+                <!-- Filmstrip sits on its own row; JS aligns it with the slider track -->
+                <div id="filmstrip" class="filmstrip"></div>
+            </div>
+        </footer>
+
+        <!-- Error modal (upload / session start failures) -->
+        <div id="error-modal" class="modal-backdrop" hidden>
+            <div class="modal" role="dialog" aria-modal="true">
+                <h3 id="modal-title">错误</h3>
+                <p id="modal-text"></p>
+                <div class="modal-actions">
+                    <button id="btn-modal-close" type="button" class="btn btn-primary">确定</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Docked log terminal: flush against the page's left/bottom edges,
+             up to the video bottom and the bottom-nav left edge (JS docks it) -->
+        <div id="log-terminal">
+            <div class="lt-header">
+                <span class="lt-dot"></span>
+                <span class="lt-title">终端</span>
+                <span class="lt-preview"></span>
+                <button class="lt-btn lt-clear" type="button" title="清空日志">⌫</button>
+                <button class="lt-btn lt-collapse" type="button" title="折叠 / 展开">▾</button>
+            </div>
+            <div class="lt-body"></div>
+            <button class="lt-latest" type="button" title="回到最新">↓ 最新</button>
+        </div>
+    </div>
+
+    <!-- Direct script includes (in dependency order) -->
+    <script src="/static/js/ws-client.js?v=3"></script>
+    <script src="/static/js/video-player.js?v=3"></script>
+    <script src="/static/js/prompt-canvas.js?v=3"></script>
+    <script src="/static/js/mask-overlay.js?v=4"></script>
+    <script src="/static/js/log-terminal.js?v=3"></script>
+    <script src="/static/js/app.js?v=12"></script>
+</body>
+</html>

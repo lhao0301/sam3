@@ -8,6 +8,7 @@ import queue
 import re
 import time
 import types
+from concurrent.futures import ThreadPoolExecutor
 from threading import Condition, get_ident, Lock, Thread
 from typing import Any, Optional, Union
 
@@ -231,10 +232,21 @@ def load_video_frames_from_image_folder(
     # float16 precision should be sufficient for image tensor storage
     images = torch.zeros(num_frames, 3, image_size, image_size, dtype=torch.float16)
     video_height, video_width = None, None
-    for n, img_path in enumerate(
-        tqdm(img_paths, desc=f"frame loading (image folder) [rank={RANK}]")
-    ):
-        images[n], video_height, video_width = _load_img_as_tensor(img_path, image_size)
+
+    # Decode + resize frames in a thread pool: PIL's JPEG decode and resize
+    # release the GIL, so loading scales across cores instead of paying each
+    # frame's decode latency serially. Each task writes to its own slice of
+    # `images`, so no locking is needed.
+    num_workers = max(1, min(8, os.cpu_count() or 1))
+    with ThreadPoolExecutor(max_workers=num_workers) as pool:
+        futures = [
+            (n, pool.submit(_load_img_as_tensor, img_path, image_size))
+            for n, img_path in enumerate(img_paths)
+        ]
+        for n, future in tqdm(
+            futures, desc=f"frame loading (image folder) [rank={RANK}]"
+        ):
+            images[n], video_height, video_width = future.result()
     if not offload_video_to_cpu:
         images = images.cuda()
         img_mean = img_mean.cuda()

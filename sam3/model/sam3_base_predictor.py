@@ -93,6 +93,16 @@ class Sam3BasePredictor:
                     request.get("clear_cache_threshold", _CLEAR_CACHE_THRESHOLD)
                 ),
             )
+        elif request_type == "get_frame_masks":
+            return self.get_frame_masks(
+                session_id=request["session_id"],
+                frame_idx=request["frame_index"],
+            )
+        elif request_type == "encode_features":
+            return self.encode_features(
+                session_id=request["session_id"],
+                batch_size=request.get("batch_size", 4),
+            )
         else:
             raise RuntimeError(f"invalid request type: {request_type}")
 
@@ -204,6 +214,14 @@ class Sam3BasePredictor:
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             frame_idx, outputs = self.model.add_prompt(**filtered_kwargs)
+        # Debug: log detection results
+        out_obj_ids = outputs.get("out_obj_ids", [])
+        out_masks = outputs.get("out_binary_masks", [])
+        logger.info(
+            f"add_prompt result for session {session_id} at frame {frame_idx}: "
+            f"obj_ids={list(out_obj_ids)}, num_masks={len(out_masks) if out_masks is not None else 0}, "
+            f"precomputed_vit={'yes' if inference_state.get('feature_cache', {}).get('precomputed_vit') is not None else 'no'}"
+        )
         return {"frame_index": frame_idx, "outputs": outputs}
 
     def remove_object(
@@ -289,11 +307,22 @@ class Sam3BasePredictor:
 
             # Forward propagation
             if propagation_direction in ["both", "forward"]:
+                _prop_count = 0
+                _prop_nonempty = 0
                 for frame_idx, outputs in self.model.propagate_in_video(
                     **propagate_kwargs,
                     reverse=False,
                 ):
+                    if outputs is not None:
+                        _oids = outputs.get("out_obj_ids", [])
+                        if len(_oids) > 0:
+                            _prop_nonempty += 1
+                    _prop_count += 1
                     yield {"frame_index": frame_idx, "outputs": outputs}
+                logger.info(
+                    f"Propagation forward for {session_id}: "
+                    f"{_prop_count} frames yielded, {_prop_nonempty} non-empty"
+                )
             # Backward propagation
             if propagation_direction in ["both", "backward"]:
                 for frame_idx, outputs in self.model.propagate_in_video(
@@ -311,6 +340,113 @@ class Sam3BasePredictor:
         self._extend_expiration_time(session)
         self.model.reset_state(inference_state)
         return {"is_success": True}
+
+    @torch.inference_mode()
+    def get_frame_masks(self, session_id, frame_idx):
+        """Retrieve masks for a specific frame after propagation.
+
+        First checks cached_frame_outputs (post-filtered). If empty (e.g.
+        due to hotstart filtering), falls back to output_dict which contains
+        raw prediction masks from the propagation pass.
+        """
+        import torch
+        import torch.nn.functional as F
+
+        session = self._get_session(session_id)
+        inference_state = session["state"]
+        self._extend_expiration_time(session)
+
+        # --- Try cached_frame_outputs first (filtered, may be empty) ---
+        cached = inference_state.get("cached_frame_outputs", {})
+        obj_id_to_mask = cached.get(frame_idx, {})
+
+        if obj_id_to_mask:
+            obj_ids = []
+            binary_masks = []
+            for obj_id, mask_tensor in obj_id_to_mask.items():
+                obj_ids.append(int(obj_id))
+                if hasattr(mask_tensor, "cpu"):
+                    mask_np = mask_tensor.cpu().numpy()
+                else:
+                    mask_np = mask_tensor
+                # Ensure 2D
+                if mask_np.ndim == 3 and mask_np.shape[0] == 1:
+                    mask_np = mask_np[0]
+                binary_masks.append(mask_np)
+            if obj_ids:
+                return {"obj_ids": obj_ids, "binary_masks": binary_masks}
+
+        # --- Fallback: read raw predictions from output_dict ---
+        output_dict = inference_state.get("output_dict", {})
+        obj_ids_list = inference_state.get("obj_ids", [])
+
+        for storage_key in ("cond_frame_outputs", "non_cond_frame_outputs"):
+            frame_outputs = output_dict.get(storage_key, {})
+            if frame_idx not in frame_outputs:
+                continue
+
+            frame_out = frame_outputs[frame_idx]
+            pred_masks = frame_out.get("pred_masks")  # (N, 1, H_low, W_low)
+            if pred_masks is None:
+                continue
+
+            # Get video-resolution masks
+            H_video = inference_state.get("orig_height", 0)
+            W_video = inference_state.get("orig_width", 0)
+            if H_video == 0 or W_video == 0:
+                continue
+
+            # Convert logits to binary masks via sigmoid + threshold
+            if hasattr(pred_masks, "detach"):
+                pred_masks = pred_masks.detach()
+            masks_prob = torch.sigmoid(pred_masks.float())
+            # Resize to video resolution
+            if masks_prob.dim() == 4:
+                # (N, 1, H_low, W_low) -> (N, H_video, W_video)
+                masks_resized = F.interpolate(
+                    masks_prob,
+                    size=(H_video, W_video),
+                    mode="bilinear",
+                    align_corners=False,
+                )[:, 0]  # remove channel dim
+            else:
+                masks_resized = masks_prob
+
+            binary = (masks_resized > 0.5).cpu().numpy()
+
+            obj_ids = []
+            binary_masks = []
+            for i, obj_id in enumerate(obj_ids_list):
+                if i < binary.shape[0] and binary[i].any():
+                    obj_ids.append(int(obj_id))
+                    binary_masks.append(binary[i])
+
+            if obj_ids:
+                return {"obj_ids": obj_ids, "binary_masks": binary_masks}
+
+        return {"obj_ids": [], "binary_masks": []}
+
+    @torch.inference_mode()
+    def encode_features(self, session_id, batch_size=4):
+        """Pre-compute ViT backbone features for all frames in a session.
+
+        Runs the ViT trunk on all video frames in batches and caches the raw
+        ViT outputs in ``feature_cache["precomputed_vit"]``.  Subsequent
+        ``add_prompt`` and ``propagate_in_video`` calls will skip the ViT
+        forward and only run the lightweight FPN neck per frame.
+
+        The cached features survive ``reset_state`` (called at the beginning
+        of every ``add_prompt``), so changing prompts no longer requires
+        re-encoding the video.
+        """
+        session = self._get_session(session_id)
+        inference_state = session["state"]
+        self._extend_expiration_time(session)
+        result = self.model.encode_all_features(
+            inference_state, batch_size=batch_size
+        )
+        logger.info(f"Encoded features for session {session_id}: {result}")
+        return result
 
     def close_session(
         self,

@@ -578,11 +578,17 @@ class Sam3VideoBase(nn.Module):
         start_frame_idx = tracking_bounds.get("propagate_in_video_start_frame_idx")
 
         # pyre-fixme[29]: `Union[Module, Tensor]` is not a function.
+        backbone_out_dict = {
+            "img_batch_all_stages": input_batch.img_batch,
+            **text_outputs,
+        }
+        # Inject pre-computed ViT features if available so that
+        # _get_img_feats skips the expensive ViT forward pass.
+        precomputed_vit = feature_cache.get("precomputed_vit")
+        if precomputed_vit is not None:
+            backbone_out_dict["precomputed_vit"] = precomputed_vit
         sam3_image_out, _ = self.detector.forward_video_grounding_multigpu(
-            backbone_out={
-                "img_batch_all_stages": input_batch.img_batch,
-                **text_outputs,
-            },
+            backbone_out=backbone_out_dict,
             find_inputs=input_batch.find_inputs,
             geometric_prompt=geometric_prompt,
             frame_idx=frame_idx,

@@ -78,16 +78,20 @@ class SAM3VLBackbone(nn.Module):
         output.update(self.forward_text(captions, input_boxes, additional_text, device))
         return output
 
-    def forward_image(self, samples: torch.Tensor):
+    def forward_image(
+        self, samples: torch.Tensor,
+        precomputed_vit: Optional[List[torch.Tensor]] = None,
+    ):
         return activation_ckpt_wrapper(self._forward_image_no_act_ckpt)(
             samples=samples,
             act_ckpt_enable=self.act_ckpt_whole_vision_backbone and self.training,
+            precomputed_vit=precomputed_vit,
         )
 
-    def _forward_image_no_act_ckpt(self, samples):
+    def _forward_image_no_act_ckpt(self, samples, precomputed_vit=None):
         # Forward through backbone
         sam3_features, sam3_pos, sam2_features, sam2_pos = self.vision_backbone.forward(
-            samples
+            samples, precomputed_vit=precomputed_vit
         )
         if self.scalp > 0:
             # Discard the lowest resolution features

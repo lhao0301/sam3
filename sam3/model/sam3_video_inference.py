@@ -91,6 +91,68 @@ class Sam3VideoInference(Sam3VideoBase):
         return inference_state
 
     @torch.inference_mode()
+    def encode_all_features(self, inference_state, batch_size=4):
+        """Pre-compute ViT backbone features for all video frames.
+
+        Runs the ViT backbone (the expensive part) on all frames in batches and
+        caches the raw ViT outputs in ``feature_cache["precomputed_vit"]``.
+        Subsequent ``add_prompt`` and ``propagate_in_video`` calls will skip the
+        ViT forward and only run the lightweight FPN neck per frame.
+
+        The cached ViT features survive ``reset_state`` (which is called at the
+        beginning of every ``add_prompt``), so changing prompts no longer
+        requires re-encoding the video.
+
+        Args:
+            inference_state: The session's inference state.
+            batch_size: Number of frames per ViT forward pass (memory vs. speed).
+
+        Returns:
+            Dict with ``num_frames_encoded``.
+        """
+        input_batch = inference_state["input_batch"]
+        img_batch = input_batch.img_batch
+        num_frames = inference_state["num_frames"]
+        device = self.device
+
+        # img_batch may be a tensor or an AsyncImageFrameLoader (when
+        # async_loading_frames=True).  Handle both by indexing per-frame.
+        is_tensor = isinstance(img_batch, torch.Tensor)
+
+        # Run ViT backbone in batches to avoid GPU OOM
+        all_vit_outputs = None
+        for start_idx in range(0, num_frames, batch_size):
+            end_idx = min(start_idx + batch_size, num_frames)
+            if is_tensor:
+                batch = img_batch[start_idx:end_idx].to(
+                    dtype=torch.float32, device=device
+                )
+            else:
+                # AsyncImageFrameLoader or list: index per-frame then stack
+                frames = [img_batch[i] for i in range(start_idx, end_idx)]
+                batch = torch.stack(frames).to(
+                    dtype=torch.float32, device=device
+                )
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                # Run only the ViT trunk (not the FPN neck)
+                xs = self.detector.backbone.vision_backbone.trunk(batch)
+            if all_vit_outputs is None:
+                all_vit_outputs = [f.clone() for f in xs]
+            else:
+                for i, f in enumerate(xs):
+                    all_vit_outputs[i] = torch.cat(
+                        [all_vit_outputs[i], f], dim=0
+                    )
+
+        # Store in feature_cache; survives reset_state
+        inference_state["feature_cache"]["precomputed_vit"] = all_vit_outputs
+        logger.info(
+            f"Pre-computed ViT features for {num_frames} frames "
+            f"(batch_size={batch_size})"
+        )
+        return {"num_frames_encoded": num_frames}
+
+    @torch.inference_mode()
     def reset_state(self, inference_state):
         """Revert `inference_state` to what it was right after initialization."""
         inference_state["input_batch"].find_text_batch[0] = "<text placeholder>"
@@ -109,7 +171,14 @@ class Sam3VideoInference(Sam3VideoBase):
         inference_state["visual_prompt_mask"] = None
         inference_state["tracker_inference_states"].clear()
         inference_state["tracker_metadata"].clear()
+        # Preserve pre-computed ViT features across prompt changes so that
+        # subsequent add_prompt / propagate_in_video calls reuse them.
+        precomputed_vit = inference_state["feature_cache"].pop(
+            "precomputed_vit", None
+        )
         inference_state["feature_cache"].clear()
+        if precomputed_vit is not None:
+            inference_state["feature_cache"]["precomputed_vit"] = precomputed_vit
         inference_state["cached_frame_outputs"].clear()
         inference_state["action_history"].clear()  # for logging user actions
 

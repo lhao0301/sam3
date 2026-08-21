@@ -157,11 +157,24 @@ class Sam3Image(torch.nn.Module):
             (len(img_batch),), -1, dtype=torch.long, device=self.device
         )
         id_mapping[unique_ids] = torch.arange(len(unique_ids), device=self.device)
-        backbone_out = {
-            **backbone_out,
-            **self.backbone.forward_image(image),
-            "id_mapping": id_mapping,
-        }
+        # If pre-computed ViT features are available, pass them to skip the
+        # expensive ViT backbone forward and only run the FPN neck.
+        precomputed_vit = backbone_out.get("precomputed_vit")
+        if precomputed_vit is not None:
+            vit_subset = [f[unique_ids] for f in precomputed_vit]
+            backbone_out = {
+                **backbone_out,
+                **self.backbone.forward_image(
+                    image, precomputed_vit=vit_subset
+                ),
+                "id_mapping": id_mapping,
+            }
+        else:
+            backbone_out = {
+                **backbone_out,
+                **self.backbone.forward_image(image),
+                "id_mapping": id_mapping,
+            }
         assert "backbone_fpn" in backbone_out
         return self._get_img_feats(backbone_out, img_ids=img_ids)
 

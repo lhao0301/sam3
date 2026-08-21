@@ -101,14 +101,18 @@ class Sam3DualViTDetNeck(nn.Module):
             self.sam2_convs = deepcopy(self.convs)
 
     def forward(
-        self, tensor_list: List[torch.Tensor]
+        self, tensor_list: List[torch.Tensor],
+        precomputed_vit: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[
         List[torch.Tensor],
         List[torch.Tensor],
         Optional[List[torch.Tensor]],
         Optional[List[torch.Tensor]],
     ]:
-        xs = self.trunk(tensor_list)
+        if precomputed_vit is not None:
+            xs = precomputed_vit
+        else:
+            xs = self.trunk(tensor_list)
         sam3_out, sam3_pos = [], []
         sam2_out, sam2_pos = None, None
         if self.sam2_convs is not None:

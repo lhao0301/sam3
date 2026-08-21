@@ -1,0 +1,1006 @@
+/* SAM3 Video Annotation System - Stylesheet
+ * Design: compact dark product UI
+ *   - neutral dark palette, single accent color
+ *   - flat toolbar with hairline group separators
+ *   - unified 30px control height, segmented controls
+ *   - player-style bottom navigation bar
+ */
+
+:root {
+    --bg-primary: #0d1017;
+    --bg-secondary: #131722;
+    --bg-panel: #1a1f2e;
+    --bg-canvas: #000000;
+    --text-primary: #e8eaf0;
+    --text-secondary: #8b93a7;
+    --accent: #3d7eff;
+    --accent-hover: #5b93ff;
+    --success: #2fbf71;
+    --danger: #ef5350;
+    --border: #232937;
+    --border-light: #303850;
+    --radius: 7px;
+    --control-h: 30px;
+    --sidebar-w: 240px;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    height: 100vh;
+    overflow: hidden;
+    font-size: 13px;
+}
+
+#app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+/* ── Header ─────────────────────────────────────────────────── */
+#header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 20px;
+    height: 48px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+.brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.brand-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    background: linear-gradient(135deg, var(--accent), #7a5cff);
+}
+
+#header h1 {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+#status-bar {
+    display: flex;
+    gap: 8px;
+}
+
+.status-pill {
+    padding: 3px 12px;
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.status-pill[hidden] {
+    display: none;
+}
+
+/* ── Main content ───────────────────────────────────────────── */
+#main-content {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+}
+
+/* ── Top toolbar ────────────────────────────────────────────── */
+#toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 8px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+}
+
+/* Single-row groups separated by hairlines */
+.tool-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    min-width: 0;
+}
+
+.tool-group + .tool-group {
+    border-left: 1px solid var(--border);
+}
+
+.tool-group.grow {
+    flex: 1;
+}
+
+/* ── Buttons ────────────────────────────────────────────────── */
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--control-h);
+    padding: 0 14px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    background-color: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+    font-size: 12.5px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s;
+    user-select: none;
+}
+
+.btn:hover:not(:disabled) {
+    background-color: rgba(255, 255, 255, 0.09);
+    border-color: #3d4a63;
+}
+
+.btn:active:not(:disabled) {
+    background-color: rgba(255, 255, 255, 0.13);
+}
+
+.btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+/* Label buttons cannot use [disabled]; emulate it with a class */
+.btn.disabled {
+    pointer-events: none;
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.btn-primary {
+    background-color: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+.btn-primary:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+
+.btn-success {
+    background-color: var(--success);
+    border-color: var(--success);
+    color: #fff;
+}
+
+.btn-success:hover:not(:disabled) {
+    background-color: #3ad180;
+    border-color: #3ad180;
+}
+
+.btn-danger {
+    background-color: transparent;
+    border-color: rgba(239, 83, 80, 0.45);
+    color: var(--danger);
+}
+
+.btn-danger:hover:not(:disabled) {
+    background-color: rgba(239, 83, 80, 0.12);
+    border-color: var(--danger);
+}
+
+/* Square icon tool buttons (+ / − / box, undo / clear) */
+.btn-sq {
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    font-size: 14px;
+    border-radius: 6px;
+}
+
+.btn-icon {
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    font-size: 18px;
+    border-radius: 8px;
+}
+
+/* Encoded state */
+#btn-encode.encoded {
+    background-color: rgba(47, 191, 113, 0.15);
+    border-color: rgba(47, 191, 113, 0.5);
+    color: var(--success);
+}
+
+.btn-row {
+    display: flex;
+    gap: 6px;
+}
+
+/* ── Tooltip (hover hints on toolbar buttons) ───────────────── */
+[data-tip] {
+    position: relative;
+}
+
+[data-tip]::after {
+    content: attr(data-tip);
+    position: absolute;
+    top: calc(100% + 7px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: 280px;
+    padding: 5px 10px;
+    background-color: #05070b;
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 11.5px;
+    font-weight: 400;
+    line-height: 1.6;
+    text-align: center;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.15s ease, visibility 0.15s;
+    z-index: 200;
+}
+
+/* Small arrow pointing up at the hovered button */
+[data-tip]::before {
+    content: "";
+    position: absolute;
+    top: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 5px solid transparent;
+    border-bottom-color: #05070b;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity 0.15s ease, visibility 0.15s;
+    z-index: 201;
+}
+
+[data-tip]:hover::after,
+[data-tip]:hover::before {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Edge button: anchor the tooltip to the left edge instead of centering */
+.tip-left::after {
+    left: 0;
+    transform: none;
+    text-align: left;
+}
+
+.tip-left::before {
+    left: 14px;
+    transform: none;
+}
+
+/* File input rendered as a button */
+.file-label {
+    cursor: pointer;
+}
+
+.file-label:hover {
+    background-color: rgba(255, 255, 255, 0.09);
+    border-color: #3d4a63;
+}
+
+/* ── Inputs ─────────────────────────────────────────────────── */
+input[type="text"],
+input[type="number"] {
+    height: var(--control-h);
+    padding: 0 10px;
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    background-color: rgba(0, 0, 0, 0.3);
+    color: var(--text-primary);
+    font-size: 12.5px;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus {
+    border-color: var(--accent);
+}
+
+input[type="text"]::placeholder {
+    color: #5a6275;
+}
+
+/* ── Selects ───────────────────────────────────────────────── */
+select {
+    height: var(--control-h);
+    padding: 0 8px;
+    background-color: rgba(0, 0, 0, 0.3);
+    color: var(--text-primary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--radius);
+    font-size: 12.5px;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s;
+}
+
+select:focus {
+    border-color: var(--accent);
+}
+
+select:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+select option {
+    background-color: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+#text-prompt-input {
+    width: 170px;
+}
+
+/* Text input highlighted while it is the active prompt tool */
+#text-prompt-input.active-tool {
+    border-color: var(--accent);
+}
+
+.confirm-row {
+    display: flex;
+    gap: 8px;
+}
+
+.confirm-row input[type="text"] {
+    width: 110px;
+}
+
+.confirm-row input[type="number"] {
+    width: 72px;
+    flex-shrink: 0;
+}
+
+/* Fixed slot so switching tools does not reflow the toolbar */
+.btn-row {
+    display: flex;
+    gap: 4px;
+}
+
+/* ── Range slider ───────────────────────────────────────────── */
+input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    background-color: var(--border-light);
+    border-radius: 2px;
+    cursor: pointer;
+    outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background-color: var(--accent);
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    transition: transform 0.1s;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+}
+
+input[type="range"]::-moz-range-thumb {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--accent);
+    border: 2px solid rgba(255, 255, 255, 0.25);
+}
+
+input[type="range"]:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+/* ── Viewport ───────────────────────────────────────────────── */
+#viewport {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--bg-canvas);
+    position: relative;
+    overflow: hidden;
+}
+
+#canvas-container {
+    position: relative;
+    display: none;
+}
+
+#canvas-container.active {
+    display: block;
+}
+
+#frame-canvas,
+#overlay-canvas,
+#draw-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+}
+
+#frame-canvas {
+    position: relative;
+    z-index: 1;
+}
+
+#overlay-canvas {
+    z-index: 2;
+    pointer-events: none;
+}
+
+#draw-canvas {
+    z-index: 3;
+    cursor: crosshair;
+}
+
+#viewport-empty {
+    color: var(--text-secondary);
+    font-size: 14px;
+    text-align: center;
+}
+
+#viewport-empty.hidden {
+    display: none;
+}
+
+/* ── Left sidebar ───────────────────────────────────────────── */
+#result-sidebar {
+    width: var(--sidebar-w);
+    background-color: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 14px;
+    flex-shrink: 0;
+}
+
+.panel {
+    background-color: var(--bg-panel);
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 14px;
+}
+
+.panel h2 {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    color: var(--text-secondary);
+}
+
+/* ── Tracklet list ──────────────────────────────────────────── */
+.tracklet-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.tracklet-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background-color: rgba(255, 255, 255, 0.04);
+    border: 1px solid transparent;
+    border-radius: 8px;
+    font-size: 12.5px;
+    transition: border-color 0.15s;
+}
+
+.tracklet-item:hover {
+    border-color: var(--border-light);
+}
+
+.box-color {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.tracklet-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.tracklet-info strong {
+    font-size: 12.5px;
+    font-weight: 600;
+}
+
+.tracklet-meta {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.tracklet-delete {
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-size: 16px;
+    line-height: 1;
+    flex-shrink: 0;
+    padding: 2px 4px;
+    border-radius: 4px;
+    transition: color 0.15s, background-color 0.15s;
+}
+
+.tracklet-delete:hover {
+    color: var(--danger);
+    background-color: rgba(239, 83, 80, 0.12);
+}
+
+/* ── Status text & hints ────────────────────────────────────── */
+.status-text {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    max-width: 260px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: opacity 0.4s;
+}
+
+.hint {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+/* ── Propagation progress ───────────────────────────────────── */
+.prop-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.progress-bar {
+    position: relative;
+    width: 130px;
+    height: 6px;
+    background-color: rgba(255, 255, 255, 0.08);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.progress-fill {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 0%;
+    background-color: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+#progress-text {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* ── Bottom navigation bar ──────────────────────────────────── */
+/* Offset by the sidebar width so the centered inner column lines
+ * up with the video canvas above it */
+#bottom-nav {
+    flex-shrink: 0;
+    background-color: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    padding: 8px 16px;
+    margin-left: var(--sidebar-w);
+}
+
+/* Inner column tracks the displayed video width (set via JS) */
+#nav-inner {
+    width: 100%;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.nav-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.btn-play {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background-color: var(--accent);
+    color: #fff;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color 0.15s, transform 0.1s;
+}
+
+.btn-play:hover:not(:disabled) {
+    background-color: var(--accent-hover);
+}
+
+.btn-play:active:not(:disabled) {
+    transform: scale(0.94);
+}
+
+.btn-play:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.nav-controls input[type="range"] {
+    flex: 1;
+    min-width: 120px;
+}
+
+.nav-frame-label {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* Slider fills the remaining space of the button row; the filmstrip row
+ * below is indented/matched to the slider track via JS (_syncBottomNavWidth) */
+#frame-slider {
+    flex: 1;
+    min-width: 60px;
+    margin: 0;
+}
+
+/* ── Filmstrip ──────────────────────────────────────────────── */
+/* Thumbnails spread evenly across the full nav width: the gap between
+ * them adapts so the strip matches the button row above it exactly. */
+.filmstrip {
+    display: flex;
+    justify-content: space-between;
+    padding-bottom: 4px;
+    overflow-x: auto;
+    min-height: 60px;
+    align-items: center;
+}
+
+.film-thumb {
+    position: relative;
+    flex-shrink: 0;
+    height: 52px;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    background-color: rgba(255, 255, 255, 0.05);
+    border: 2px solid transparent;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+}
+
+.film-thumb img {
+    display: block;
+    height: 100%;
+    width: auto;
+    opacity: 0.8;
+    transition: opacity 0.2s;
+}
+
+.film-thumb:hover img {
+    opacity: 1;
+}
+
+.film-thumb .thumb-idx {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    padding: 1px 5px;
+    background-color: rgba(0, 0, 0, 0.7);
+    color: #fff;
+    font-size: 10px;
+    line-height: 1.4;
+    font-variant-numeric: tabular-nums;
+    border-top-right-radius: 5px;
+}
+
+.film-thumb.active {
+    border-color: var(--accent);
+    transform: scale(1.05);
+}
+
+.film-thumb.active img {
+    opacity: 1;
+}
+
+.film-thumb.active .thumb-idx {
+    background-color: var(--accent);
+}
+
+/* Active prompt tool (+ / − / box) */
+.btn-sq.active {
+    background-color: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+}
+
+/* ── Modal ──────────────────────────────────────────────────── */
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background-color: rgba(0, 0, 0, 0.55);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 300;
+}
+
+.modal-backdrop[hidden] {
+    display: none;
+}
+
+.modal {
+    width: min(400px, calc(100vw - 48px));
+    background-color: var(--bg-panel);
+    border: 1px solid var(--border-light);
+    border-radius: 12px;
+    padding: 20px 22px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+
+.modal h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--danger);
+    margin-bottom: 10px;
+}
+
+.modal p {
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    line-height: 1.7;
+    margin-bottom: 18px;
+    word-break: break-all;
+}
+
+.modal-actions {
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* ── Scrollbar ──────────────────────────────────────────────── */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.24);
+}
+
+/* ── Docked log terminal (bottom-left) ──────────────────────── */
+#log-terminal {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    background-color: rgba(13, 16, 23, 0.92);
+    border-top: 1px solid var(--border-light);
+    border-right: 1px solid var(--border-light);
+    font-family: "JetBrains Mono", "Cascadia Code", Consolas, "Courier New", monospace;
+    font-size: 11.5px;
+    min-width: 150px;
+}
+
+.lt-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 24px;
+    padding: 0 6px 0 8px;
+    background-color: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    user-select: none;
+}
+
+.lt-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: var(--success);
+    animation: lt-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+}
+
+@keyframes lt-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+.lt-title {
+    color: var(--text-secondary);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    flex-shrink: 0;
+}
+
+.lt-preview {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-secondary);
+    font-size: 10.5px;
+}
+
+.lt-btn {
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    cursor: pointer;
+    flex-shrink: 0;
+    font-family: inherit;
+}
+
+.lt-btn:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.lt-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+#log-terminal.collapsed .lt-body {
+    display: none;
+}
+
+/* Collapsed: shrink to the title bar only (overrides the docked inline
+   height so the panel stops covering the dock area) */
+#log-terminal.collapsed {
+    height: 24px !important;
+    min-height: 0;
+}
+
+/* The preview is only meaningful while collapsed */
+#log-terminal:not(.collapsed) .lt-preview {
+    display: none;
+}
+
+.lt-line {
+    display: flex;
+    gap: 6px;
+    padding: 1px 8px;
+    line-height: 1.55;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.lt-ts {
+    color: #5a6172;
+    flex-shrink: 0;
+}
+
+.lt-lv {
+    flex-shrink: 0;
+    font-weight: 600;
+}
+
+.lt-info { color: #7f9bc4; }
+.lt-ok   { color: var(--success); }
+.lt-warn { color: #f0a848; }
+.lt-err  { color: var(--danger); }
+
+.lt-msg {
+    color: var(--text-primary);
+    flex: 1;
+    min-width: 0;
+}
+
+.lt-progress .lt-msg {
+    color: var(--accent-hover);
+}
+
+.lt-latest {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    display: none;
+    padding: 2px 8px;
+    background-color: var(--bg-panel);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    color: var(--accent);
+    font-size: 10.5px;
+    font-family: inherit;
+    cursor: pointer;
+}
+
+.lt-latest.visible {
+    display: block;
+}
+
+.lt-latest:hover {
+    background-color: var(--border);
+}
+
+/* Slim scrollbar for the log body */
+.lt-body::-webkit-scrollbar {
+    width: 6px;
+}
+
+.lt-body::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.lt-body::-webkit-scrollbar-thumb {
+    background-color: var(--border-light);
+    border-radius: 3px;
+}
+
+.lt-body::-webkit-scrollbar-thumb:hover {
+    background-color: #465268;
+}
