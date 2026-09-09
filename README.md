@@ -62,6 +62,30 @@ This breakthrough is driven by an innovative data engine that has automatically 
 - A new suite of improved model checkpoints (denoted as **SAM 3.1**) are released on [Hugging Face](https://huggingface.co/facebook/sam3.1). See [`RELEASE_SAM3p1.md`](RELEASE_SAM3p1.md) for full details.
   * To use the new SAM 3.1 checkpoints, you need the latest model code from this repo. If you have installed an earlier version of this repo, pull the latest code from this repo (with `git pull`), and then reinstall the repo following [Installation](#installation) below.
 
+## Video Annotation System (`app/`)
+
+This repository also ships a self-contained, browser-based **single-object video annotation tool** built on top of SAM 3's video tracker (SAM2-task mode), designed for interactive video segmentation review and annotation.
+
+**Key features**
+
+- Upload a video, scrub/play frames, and initialize a tracklet with a box on the first annotated frame
+- Incremental point/box refinement across frames (no state reset between prompts) with user-specified object ids
+- Mask preview and confirmation before propagation; results streamed to the browser over WebSocket
+- Per-session prompt history; sessions are cached server-side and cleared on disconnect
+- Frontend/server split: a FastAPI backend (`app/server/`) serves the static frontend (`app/frontend/`) and exposes REST + WebSocket endpoints
+
+**Quick start**
+
+```bash
+pip install -r app/server/requirements.txt
+# Place SAM 3 checkpoint weights under checkpoints/, e.g. checkpoints/sam3/
+# The GPU with the most free memory is selected automatically
+# (override with SAM3_GPU=<index>)
+uvicorn app.server.app:app --host 0.0.0.0 --port 8000
+```
+
+Then open `http://<server>:8000` in a browser. See [`app/server/app.py`](app/server/app.py) for the full REST/WebSocket API, and [`sam3.md`](sam3.md) (Chinese) for a deep-dive on the SAM 3/3.1 model architecture and operating modes.
+
 ## Installation
 
 ### Prerequisites
