@@ -80,12 +80,18 @@ class MaskOverlay {
             const data = await resp.json();
 
             if (data.obj_ids && data.obj_ids.length > 0 && data.mask_png) {
+                // storeMask renders asynchronously (img onload) and only
+                // repaints when the player is still on this frame — no
+                // unconditional displayMask here (the player may have
+                // moved on while the fetch was in flight)
                 this.storeMask(frameIdx, data.mask_png, data.obj_ids);
-                this.displayMask(frameIdx);
                 return true;
             } else {
-                // No mask for this frame — clear overlay
-                this.displayMask(frameIdx);
+                // No mask for this frame — clear overlay (only when the
+                // player is still on this frame)
+                if (this.player.getCurrentFrame() === frameIdx) {
+                    this.displayMask(frameIdx);
+                }
                 return false;
             }
         } catch (e) {
@@ -156,11 +162,43 @@ class MaskOverlay {
     }
 
     /**
+     * Fire-and-forget mask prefetch for a frame (no display refresh).
+     * During playback, right after a cache invalidation (e.g. object
+     * removal), each frame's mask would otherwise blank out until its
+     * fetch completes (fetch latency can exceed the playback step
+     * interval); prefetching the next frame keeps the cache warm so the
+     * overlay is ready when the player arrives. storeMask's onload
+     * still repaints if the player happens to be on this frame already.
+     */
+    prefetchMask(frameIdx) {
+        if (!this._sessionId) return;
+        if (frameIdx < 0 || frameIdx >= this.player.numFrames) return;
+        if (this._maskCache.has(frameIdx) || this._fetchingFrames.has(frameIdx)) return;
+
+        this._fetchingFrames.add(frameIdx);
+        fetch(`/api/mask/${this._sessionId}/${frameIdx}`)
+            .then((resp) => (resp.ok ? resp.json() : null))
+            .then((data) => {
+                if (data && data.obj_ids && data.obj_ids.length > 0 && data.mask_png) {
+                    this.storeMask(frameIdx, data.mask_png, data.obj_ids);
+                }
+            })
+            .catch(() => { /* prefetch failures are non-fatal */ })
+            .finally(() => this._fetchingFrames.delete(frameIdx));
+    }
+
+    /**
      * Display the mask overlay for a given frame.
      * If no mask is cached for this frame, clears the overlay.
+     *
+     * Stale-call guard: only repaint when the player is still on the
+     * requested frame — calls scheduled while the player kept moving
+     * (playback, fetch completions) must not paint another frame's mask
+     * onto the current one.
      * @param {number} frameIdx
      */
     displayMask(frameIdx) {
+        if (frameIdx !== this.player.getCurrentFrame()) return;
         const img = this._maskCache.get(frameIdx);
         this._currentMaskImage = img;
 
@@ -199,28 +237,33 @@ class MaskOverlay {
 
     /**
      * Get color info for an object ID (must match backend palette).
+     *
+     * The backend palette (mask_utils.py _COLOR_PALETTE) is BGR-typed for
+     * OpenCV; the color a rendered mask actually shows on screen is that
+     * BGR triple read as RGB. This palette lists exactly those displayed
+     * colors so the sidebar swatch always matches the mask overlay.
      */
     getObjectColor(objId) {
         const palette = [
-            { r: 255, g: 0, b: 0 },      // red
-            { r: 0, g: 255, b: 0 },      // green
             { r: 0, g: 0, b: 255 },      // blue
+            { r: 0, g: 255, b: 0 },      // green
+            { r: 255, g: 0, b: 0 },      // red
             { r: 0, g: 255, b: 255 },    // cyan
             { r: 255, g: 0, b: 255 },    // magenta
             { r: 255, g: 255, b: 0 },    // yellow
-            { r: 128, g: 0, b: 0 },      // maroon
-            { r: 0, g: 128, b: 0 },      // dark green
             { r: 0, g: 0, b: 128 },      // navy
-            { r: 128, g: 128, b: 0 },    // olive
-            { r: 128, g: 0, b: 128 },    // purple
+            { r: 0, g: 128, b: 0 },      // dark green
+            { r: 128, g: 0, b: 0 },      // maroon
             { r: 0, g: 128, b: 128 },    // teal
-            { r: 255, g: 128, b: 0 },    // orange
-            { r: 128, g: 255, b: 0 },    // lime
+            { r: 128, g: 0, b: 128 },    // purple
+            { r: 128, g: 128, b: 0 },    // olive
             { r: 0, g: 128, b: 255 },    // sky blue
-            { r: 255, g: 0, b: 128 },    // pink
-            { r: 128, g: 255, b: 255 },  // light yellow
-            { r: 255, g: 128, b: 128 },  // light red
+            { r: 0, g: 255, b: 128 },    // spring green
+            { r: 255, g: 128, b: 0 },    // orange
+            { r: 128, g: 0, b: 255 },    // violet
+            { r: 255, g: 255, b: 128 },  // light yellow
             { r: 128, g: 128, b: 255 },  // light blue
+            { r: 255, g: 128, b: 128 },  // light red
             { r: 200, g: 200, b: 200 },  // gray
         ];
         const c = palette[objId % palette.length];

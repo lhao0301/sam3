@@ -1,10 +1,13 @@
 // app.js - Main application logic for SAM3 video annotation system
+// (SAM2-task mode: incremental point/box prompts with user-specified ids)
 //
 // Interaction flow:
-//   upload → (encode) → navigate frames → pick prompt mode (text/point/box)
-//   → draw prompt → segment preview (== commit with tracklet id)
-//   → confirm (keep) / undo (remove_object) → accumulate tracklets
+//   upload → navigate frames → pick tool (point+ / point- / box;
+//   box and points can be combined) → draw prompt → segment preview
+//   (submits obj_id: new id = new object, existing id = refinement)
+//   → confirm (keep) / undo (remove) → accumulate tracklets
 //   → propagate (forward / backward / both) → playback preview
+//   → refine bad frames → re-propagate (reset tracking to add objects)
 
 class AnnotationApp {
     constructor() {
@@ -16,10 +19,10 @@ class AnnotationApp {
         this.isPropagating = false;
 
         // Prompt state
-        this.promptMode = "box";     // "text" | "point" | "box"
+        this.promptMode = "box";     // active tool: "point" | "box"
         this.pointType = 1;          // 1 = positive, 0 = negative
         this.tracklets = new Map();  // id -> {id, className, color, promptType, frameIdx}
-        this.pendingObjIds = [];     // obj ids from last preview, awaiting confirm/undo
+        this.pendingObjIds = [];     // obj id from last preview, awaiting confirm/undo
         this.pendingFrameIdx = -1;
 
         // Filmstrip state
@@ -41,6 +44,12 @@ class AnnotationApp {
 
         // Throttle timestamp for propagation progress log lines
         this._lastPropLogTs = 0;
+
+        // Propagation plan state (segment budgets / counters), populated
+        // on propagation_started and used for honest progress display
+        this._propPlan = null;
+        this._propExpectedTotal = 0;
+        this._propSegmentCounts = { forward: 0, backward: 0, backfill: 0 };
 
         // UI elements
         this.els = {};
@@ -101,9 +110,15 @@ class AnnotationApp {
             btnUpload: document.getElementById("btn-upload"),
             uploadStatus: document.getElementById("upload-status"),
             videoInfo: document.getElementById("video-info"),
-            // Encoding
-            btnEncode: document.getElementById("btn-encode"),
-            encodeStatus: document.getElementById("encode-status"),
+            // Server-path fallback (sandboxed preview browsers)
+            serverPathInput: document.getElementById("server-path-input"),
+            btnLoadPath: document.getElementById("btn-load-path"),
+            // Prompt tools (point+/-/box buttons; combinable)
+            btnPointPositive: document.getElementById("btn-point-positive"),
+            btnPointNegative: document.getElementById("btn-point-negative"),
+            btnBoxTool: document.getElementById("btn-box-tool"),
+            btnUndoPoint: document.getElementById("btn-undo-point"),
+            btnClearPoints: document.getElementById("btn-clear-points"),
             // Navigation
             btnPlay: document.getElementById("btn-play"),
             btnPrev: document.getElementById("btn-prev-frame"),
@@ -113,13 +128,6 @@ class AnnotationApp {
             frameTotalLabel: document.getElementById("frame-total-label"),
             filmstrip: document.getElementById("filmstrip"),
             navInner: document.getElementById("nav-inner"),
-            // Prompt tools (text input + point+/-/box buttons)
-            textInput: document.getElementById("text-prompt-input"),
-            btnPointPositive: document.getElementById("btn-point-positive"),
-            btnPointNegative: document.getElementById("btn-point-negative"),
-            btnBoxTool: document.getElementById("btn-box-tool"),
-            btnUndoPoint: document.getElementById("btn-undo-point"),
-            btnClearPoints: document.getElementById("btn-clear-points"),
             // Confirm row
             classNameInput: document.getElementById("class-name-input"),
             trackletIdInput: document.getElementById("tracklet-id-input"),
@@ -131,6 +139,7 @@ class AnnotationApp {
             directionSelect: document.getElementById("propagation-direction"),
             btnPropagate: document.getElementById("btn-propagate"),
             btnCancel: document.getElementById("btn-cancel"),
+            btnResetTracking: document.getElementById("btn-reset-tracking"),
             progressFill: document.getElementById("progress-fill"),
             progressText: document.getElementById("progress-text"),
             // Status bar
@@ -182,8 +191,19 @@ class AnnotationApp {
             this.els.frameSlider.value = frameIdx;
             this._updateFilmstripHighlight(frameIdx);
 
+            // Redraw pending prompts (the player cleared the draw canvas;
+            // content anchored to another frame stays hidden)
+            this.promptCanvas.notifyFrameChanged();
+
             if (this.sessionId) {
                 this.maskOverlay.fetchAndDisplayMask(frameIdx);
+                // Prefetch the next frame during playback: after a cache
+                // invalidation (e.g. object removal) each frame would
+                // otherwise blank out until its fetch completes, since
+                // fetch latency can exceed the playback step interval
+                if (this._isPlaying && frameIdx + 1 < this.numFrames) {
+                    this.maskOverlay.prefetchMask(frameIdx + 1);
+                }
             }
         };
 
@@ -202,10 +222,13 @@ class AnnotationApp {
             }
         });
 
-        // Feature encoding
-        if (this.els.btnEncode) {
-            this.els.btnEncode.addEventListener("click", () => this._handleEncode());
-        }
+        // Server-path fallback: load a video that already lives on the
+        // server directly (the sandboxed preview browser's file picker
+        // cannot reach a local disk)
+        this.els.btnLoadPath.addEventListener("click", () => this._handleServerPathLoad());
+        this.els.serverPathInput.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") this._handleServerPathLoad();
+        });
 
         // Playback / navigation
         this.els.btnPlay.addEventListener("click", () => this._togglePlay());
@@ -232,8 +255,8 @@ class AnnotationApp {
             }
         });
 
-        // Prompt tools: mutually exclusive point+ / point- / box; focusing
-        // the text input switches to text mode
+        // Prompt tools: point+ / point- / box switch the active tool;
+        // pending content is kept so a box and clicks can be combined
         this.els.btnPointPositive.addEventListener("click", () => {
             this._setPromptMode("point");
             this._setPointType(1);
@@ -246,10 +269,6 @@ class AnnotationApp {
         this.els.btnUndoPoint.addEventListener("click", () => this.promptCanvas.undoLastPoint());
         this.els.btnClearPoints.addEventListener("click", () => this.promptCanvas.clearPending());
 
-        // Text input: focusing it switches to text mode; typing updates buttons
-        this.els.textInput.addEventListener("focus", () => this._setPromptMode("text"));
-        this.els.textInput.addEventListener("input", () => this._updatePromptButtons());
-
         // Segment preview / confirm / undo
         this.els.btnSegmentPreview.addEventListener("click", () => this._handleSegmentPreview());
         this.els.btnConfirmPrompt.addEventListener("click", () => this._handleConfirmPrompt());
@@ -258,6 +277,7 @@ class AnnotationApp {
         // Propagation
         this.els.btnPropagate.addEventListener("click", () => this._handlePropagate());
         this.els.btnCancel.addEventListener("click", () => this._handleCancel());
+        this.els.btnResetTracking.addEventListener("click", () => this._handleResetTracking());
 
         // Window resize: re-fit viewport
         let resizeTimer = null;
@@ -332,6 +352,48 @@ class AnnotationApp {
         this.els.errorModal.hidden = true;
     }
 
+    // Close the current session server-side (its GPU state and frames are
+    // released immediately instead of lingering until the idle timeout).
+    // Shared by the file upload and the server-path load flows.
+    async _closeOldSessionIfAny() {
+        if (!this.sessionId) return;
+        const oldSid = this.sessionId;
+        this.sessionId = null;
+        this.logTerminal.log("INFO", "新上传替换旧会话，正在关闭...");
+        try {
+            await fetch(`/api/session/${oldSid}`, { method: "DELETE" });
+            this.logTerminal.log("OK", `旧会话 ${oldSid.substring(0, 8)} 已关闭`);
+        } catch (e) {
+            // Best effort: the idle cleanup will catch it anyway
+            this.logTerminal.log("WARN", `旧会话关闭失败（将由超时清理）: ${e.message}`);
+        }
+    }
+
+    // Load a video that already lives on the server by absolute path —
+    // fallback for sandboxed preview browsers whose file picker cannot
+    // reach a local disk (skips /api/upload entirely).
+    async _handleServerPathLoad() {
+        const raw = this.els.serverPathInput.value.trim();
+        if (!raw) {
+            this.logTerminal.log("WARN", "请先填写服务器上的视频绝对路径");
+            this.els.serverPathInput.focus();
+            return;
+        }
+        // Strip surrounding quotes that are common when pasting shell paths
+        const videoPath = raw.replace(/^["']|["']$/g, "");
+
+        this._setUploadEnabled(false);
+        this.logTerminal.log("INFO", `从服务器路径加载: ${videoPath}`);
+        try {
+            await this._closeOldSessionIfAny();
+            this.videoPath = videoPath;
+            this.videoFilename = videoPath.split("/").pop().split("\\").pop();
+            await this._startSession();
+        } finally {
+            this._setUploadEnabled(true);
+        }
+    }
+
     // Align the bottom navigation width with the displayed video width,
     // and align the filmstrip row with the slider track (the buttons stay
     // on the slider's row, so the strip must be indented to the slider's
@@ -362,18 +424,7 @@ class AnnotationApp {
         // A fresh upload replaces any previous session: close it
         // server-side first so its GPU state and frames are released
         // immediately instead of lingering until the idle timeout.
-        if (this.sessionId) {
-            const oldSid = this.sessionId;
-            this.sessionId = null;
-            this.logTerminal.log("INFO", "新上传替换旧会话，正在关闭...");
-            try {
-                await fetch(`/api/session/${oldSid}`, { method: "DELETE" });
-                this.logTerminal.log("OK", `旧会话 ${oldSid.substring(0, 8)} 已关闭`);
-            } catch (e) {
-                // Best effort: the idle cleanup will catch it anyway
-                this.logTerminal.log("WARN", `旧会话关闭失败（将由超时清理）: ${e.message}`);
-            }
-        }
+        await this._closeOldSessionIfAny();
 
         try {
             const formData = new FormData();
@@ -454,6 +505,7 @@ class AnnotationApp {
             // Reset per-session state
             this.tracklets.clear();
             this.pendingObjIds = [];
+            this.promptCanvas.clearPending();
             this._renderTrackletList();
 
             // Initialize player
@@ -483,14 +535,13 @@ class AnnotationApp {
 
             // Enable prompt interaction
             this.promptCanvas.enable();
-            if (this.els.btnEncode) {
-                this.els.btnEncode.disabled = false;
-            }
+            this.els.btnResetTracking.disabled = false;
             this.els.trackletIdInput.value = this._suggestTrackletId();
             this._updatePromptButtons();
 
             this.els.uploadStatus.textContent = "";
             this._setUploadState("btn-success");
+            this.els.btnUpload.textContent = "⬆ 上传视频";
             this.els.videoInfo.textContent =
                 `${data.num_frames} 帧 · ${data.orig_width}×${data.orig_height}`;
             this.els.videoInfo.hidden = false;
@@ -512,77 +563,28 @@ class AnnotationApp {
         } catch (e) {
             this.logTerminal.progressEnd("session", "ERR", `会话启动失败: ${e.message}`);
             this._setUploadState("btn-danger");
+            this.els.btnUpload.textContent = "⬆ 上传视频";
             this._showErrorModal("会话启动失败", e.message);
         }
     }
 
-    // ─── Feature Encoding ─────────────────────────────────────────
-
-    async _handleEncode() {
-        if (!this.sessionId) return;
-
-        this.els.btnEncode.disabled = true;
-        this.els.encodeStatus.textContent = "正在编码特征（ViT backbone），请稍候...";
-        this.els.encodeStatus.style.color = "var(--accent)";
-        this.logTerminal.progressStart("encode", "ViT 特征编码中...");
-
-        try {
-            const resp = await fetch(`/api/encode/${this.sessionId}`, {
-                method: "POST",
-            });
-
-            if (!resp.ok) {
-                const err = await resp.json();
-                throw new Error(err.detail || "Encode failed");
-            }
-
-            const data = await resp.json();
-            if (data.already_encoded) {
-                this.els.encodeStatus.textContent = `特征已编码 (${data.num_frames_encoded} 帧)`;
-                this.logTerminal.progressEnd(
-                    "encode", "INFO",
-                    `特征已编码（缓存命中，${data.num_frames_encoded} 帧）`
-                );
-            } else {
-                this.els.encodeStatus.textContent =
-                    `✓ 编码完成: ${data.num_frames_encoded} 帧`;
-                this.logTerminal.progressEnd(
-                    "encode", "OK", `特征编码完成: ${data.num_frames_encoded} 帧`
-                );
-            }
-            this.els.encodeStatus.style.color = "#4caf50";
-            this.els.btnEncode.textContent = "✓ 已编码";
-            this.els.btnEncode.classList.add("encoded");
-        } catch (e) {
-            this.els.encodeStatus.textContent = `编码失败: ${e.message}`;
-            this.els.encodeStatus.style.color = "#e53935";
-            this.els.btnEncode.disabled = false;
-            this.logTerminal.progressEnd("encode", "ERR", `特征编码失败: ${e.message}`);
-        }
-    }
-
-    // ─── Prompt Mode ──────────────────────────────────────────────
+    // ─── Prompt Tool Selection ──────────────────────────────────────
 
     _setPromptMode(mode) {
-        // Same-mode calls (e.g. switching P+ -> N-) must not clear pending points
+        // Only switches the active drawing tool; the pending content
+        // (box + points) is kept so prompts can be combined on submission
         if (this.promptMode === mode) return;
 
         this.promptMode = mode;
         this.promptCanvas.setMode(mode);
 
-        // Text / box prompts get auto-assigned ids from SAM3's detection
-        // path; only point prompts accept a user-specified tracklet id.
-        this.els.trackletIdInput.hidden = mode !== "point";
-
         this._updateToolButtons();
-        this._setPromptStatus("");
         this._updatePromptButtons();
     }
 
-    // Highlight the currently active prompt tool (text input / P+ / N- / box)
+    // Highlight the currently active prompt tool (P+ / N- / box)
     _updateToolButtons() {
         const isPoint = this.promptMode === "point";
-        this.els.textInput.classList.toggle("active-tool", this.promptMode === "text");
         this.els.btnPointPositive.classList.toggle("active", isPoint && this.pointType === 1);
         this.els.btnPointNegative.classList.toggle("active", isPoint && this.pointType === 0);
         this.els.btnBoxTool.classList.toggle("active", this.promptMode === "box");
@@ -613,31 +615,27 @@ class AnnotationApp {
     _updatePromptButtons() {
         if (!this.sessionId) return;
 
-        const hasPending =
-            (this.promptMode === "box" && this.promptCanvas.hasPending()) ||
-            (this.promptMode === "point" && this.promptCanvas.hasPending()) ||
-            (this.promptMode === "text" && this.els.textInput.value.trim() !== "");
+        // Box and points may coexist in the pending set; either suffices
+        const hasPending = this.promptCanvas.hasPending();
 
         const locked = this.pendingObjIds.length > 0;
         this.els.btnSegmentPreview.disabled = !hasPending || locked || this.isPropagating;
         this.els.btnConfirmPrompt.disabled = !locked;
         this.els.btnUndoPrompt.disabled = !locked;
 
-        // Box and point prompts are mutually exclusive: once one type is
-        // pending, the other tool stays disabled until cleared
-        const hasBox = this.promptCanvas.pendingBox !== null;
-        const hasPoints = this.promptCanvas.pendingPoints.length > 0;
-        this.els.btnPointPositive.disabled = locked || hasBox;
-        this.els.btnPointNegative.disabled = locked || hasBox;
-        this.els.btnBoxTool.disabled = locked || hasPoints;
+        // Both tools stay available (prompts can be combined); they are
+        // locked while a preview is pending confirmation or propagating
+        this.els.btnPointPositive.disabled = locked || this.isPropagating;
+        this.els.btnPointNegative.disabled = locked || this.isPropagating;
+        this.els.btnBoxTool.disabled = locked || this.isPropagating;
         this.els.btnPropagate.disabled =
             this.tracklets.size === 0 || locked || this.isPropagating;
 
-        // Point utilities: undo removes the last point; clear removes any
-        // pending prompt (points or box) and unlocks the other tool
+        // Point utilities: undo removes the last point; clear removes the
+        // whole pending set (points or box)
         this.els.btnUndoPoint.disabled =
-            !(this.promptMode === "point" && hasPoints) || this.isPropagating;
-        this.els.btnClearPoints.disabled = !(hasBox || hasPoints) || this.isPropagating;
+            this.promptCanvas.pendingPoints.length === 0 || this.isPropagating;
+        this.els.btnClearPoints.disabled = !hasPending || this.isPropagating;
     }
 
     // ─── Segment Preview / Confirm / Undo ────────────────────────────
@@ -648,52 +646,59 @@ class AnnotationApp {
         const frameIdx = this.player.getCurrentFrame();
         const trackletId = parseInt(this.els.trackletIdInput.value);
 
-        // Build the request payload by mode
+        const pending = this.promptCanvas.getPending();
+        if (!pending) {
+            this._setPromptStatus("请先在画面上点击或拖拽画框", "#e53935");
+            return;
+        }
+        // Pending content is anchored to the frame it was drawn on: block
+        // cross-frame submission (the box/points would land on the wrong
+        // frame otherwise)
+        const pendingFrame = this.promptCanvas.getPendingFrameIdx();
+        if (pendingFrame !== null && pendingFrame !== frameIdx) {
+            this._setPromptStatus(
+                `提示绘制在帧 ${pendingFrame}，请切回该帧提交（或清除后重新绘制）`,
+                "#e53935"
+            );
+            this.logTerminal.log(
+                "WARN",
+                `阻止跨帧提交：提示属于帧 ${pendingFrame}，当前帧 ${frameIdx}`
+            );
+            return;
+        }
+        if (isNaN(trackletId) || trackletId < 0) {
+            this._setPromptStatus(
+                "请填写 tracklet id：新目标填新 id，精修填已有 id", "#e53935"
+            );
+            return;
+        }
+
+        // Combined point+box submission; obj_id decides whether this is a
+        // new object (new id) or a refinement of an existing one
         const payload = {
             session_id: this.sessionId,
             frame_idx: frameIdx,
-            prompt_type: this.promptMode,
+            obj_id: trackletId,
         };
-
-        if (this.promptMode === "text") {
-            payload.text = this.els.textInput.value.trim();
-            if (!payload.text) {
-                this._setPromptStatus("请输入文本描述", "#e53935");
-                return;
-            }
-        } else if (this.promptMode === "point") {
-            const pending = this.promptCanvas.getPending();
-            if (!pending || pending.points.length === 0) {
-                this._setPromptStatus("请先在画面上点击添加点", "#e53935");
-                return;
-            }
-            if (!pending.pointLabels.includes(1)) {
-                this._setPromptStatus("至少需要一个正点", "#e53935");
-                return;
-            }
-            if (isNaN(trackletId) || trackletId < 0) {
-                this._setPromptStatus("请填写有效的 tracklet id", "#e53935");
-                return;
-            }
+        if (pending.points) {
             payload.points = pending.points;
             payload.point_labels = pending.pointLabels;
-            payload.obj_id = trackletId;
-        } else {
-            const pending = this.promptCanvas.getPending();
-            if (!pending || pending.boxes.length === 0) {
-                this._setPromptStatus("请先在画面上拖拽画框", "#e53935");
-                return;
-            }
-            payload.boxes = pending.boxes;
-            payload.box_labels = [1]; // positive box; SAM3 auto-assigns ids
+        }
+        if (pending.box) {
+            payload.box = pending.box;
         }
 
         this.els.btnSegmentPreview.disabled = true;
-        this._setPromptStatus("分割中（模型处理中）...", "var(--accent)");
-        const typeNames = { text: "文本", point: "点", box: "框" };
+        const isRefine = this.tracklets.has(trackletId);
+        this._setPromptStatus(
+            isRefine ? `精修目标 #${trackletId} 中...` : "分割中（模型处理中）...",
+            "var(--accent)"
+        );
         this.logTerminal.log(
             "INFO",
-            `${typeNames[this.promptMode]}提示分割 @帧 ${frameIdx}...`
+            isRefine
+                ? `精修目标 #${trackletId} @帧 ${frameIdx}...`
+                : `提示分割（id=${trackletId}）@帧 ${frameIdx}...`
         );
 
         try {
@@ -709,19 +714,7 @@ class AnnotationApp {
             }
 
             const data = await resp.json();
-            // Ids newly introduced by this submission (user id for points,
-            // model-assigned ids for text / box detection prompts)
             const objIds = data.new_obj_ids || [];
-
-            if (objIds.length === 0) {
-                this._setPromptStatus(
-                    "未检出目标，请调整 prompt 后重试", "#ff9800"
-                );
-                this.logTerminal.log(
-                    "WARN", `${typeNames[this.promptMode]}提示 @帧 ${frameIdx} 未检出目标`
-                );
-                return;
-            }
 
             // Store the preview masks on the prompt frame
             this.pendingObjIds = objIds;
@@ -730,12 +723,16 @@ class AnnotationApp {
             this.maskOverlay.displayMask(frameIdx);
 
             this._setPromptStatus(
-                `已分割出目标 (id: ${objIds.join(", ")})，请确认或撤销`,
+                isRefine
+                    ? `已精修目标 #${objIds.join(", ")}，确认后请重新跟踪`
+                    : `已分割目标 (id: ${objIds.join(", ")})，请确认或撤销`,
                 "#4caf50"
             );
             this.logTerminal.log(
                 "OK",
-                `分割成功 @帧 ${frameIdx} → 检出 id: ${objIds.join(", ")}`
+                isRefine
+                    ? `精修完成 @帧 ${frameIdx} → 目标 id: ${objIds.join(", ")}`
+                    : `分割成功 @帧 ${frameIdx} → 目标 id: ${objIds.join(", ")}`
             );
         } catch (e) {
             this._setPromptStatus(`分割失败: ${e.message}`, "#e53935");
@@ -786,12 +783,12 @@ class AnnotationApp {
             });
         }
 
-        // Reset the pending state for the next target
+        // Reset the pending state for the next target (class name
+        // falls back to the default so it never blocks confirmation)
         this.pendingObjIds = [];
         this.pendingFrameIdx = -1;
         this.promptCanvas.clearPending();
-        this.els.classNameInput.value = "";
-        this.els.textInput.value = "";
+        this.els.classNameInput.value = "default";
         this.els.trackletIdInput.value = this._suggestTrackletId();
         this._setPromptStatus("已确认，可继续标注下一个目标", "#4caf50");
         this.logTerminal.log(
@@ -810,11 +807,13 @@ class AnnotationApp {
         this._setPromptStatus("撤销中...", "var(--accent)");
 
         const frameIdx = this.pendingFrameIdx;
+        const objId = this.pendingObjIds[0]; // single object per submission
         let respData = null;
 
         try {
             const resp = await fetch(
-                `/api/prompt/${this.sessionId}/pending`,
+                `/api/prompt/${this.sessionId}/pending` +
+                    `?obj_id=${objId}&frame_idx=${frameIdx}`,
                 { method: "DELETE" }
             );
             if (!resp.ok) {
@@ -837,9 +836,50 @@ class AnnotationApp {
 
         this.pendingObjIds = [];
         this.pendingFrameIdx = -1;
-        this._setPromptStatus("已撤销，可重新绘制 prompt", "#ff9800");
+        this._setPromptStatus("已撤销，可重新绘制提示", "#ff9800");
         this.logTerminal.log("INFO", `已撤销预览提示 @帧 ${frameIdx}`);
         this._updatePromptButtons();
+    }
+
+    // ─── Reset Tracking ────────────────────────────────────────────
+
+    async _handleResetTracking() {
+        if (!this.sessionId || this.isPropagating) return;
+
+        this.els.btnResetTracking.disabled = true;
+        this._setPromptStatus("重置跟踪中（重放已提交提示）...", "var(--accent)");
+        this.logTerminal.progressStart("reset", "重置跟踪中...");
+
+        try {
+            const resp = await fetch(
+                `/api/session/${this.sessionId}/reset-tracking`,
+                { method: "POST" }
+            );
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.detail || "reset failed");
+            }
+            const data = await resp.json();
+
+            // Tracking results are gone: drop cached masks and refresh the
+            // current frame from the replayed prompt outputs
+            this.maskOverlay.reset();
+            this.maskOverlay.fetchAndDisplayMask(this.player.getCurrentFrame());
+
+            this._setPromptStatus(
+                "已重置跟踪：可添加新目标，完成后请重新开始跟踪", "#ff9800"
+            );
+            this.logTerminal.progressEnd(
+                "reset", "OK",
+                `已重置跟踪（重放 ${data.num_prompts_replayed} 条提示），请重新传播`
+            );
+        } catch (e) {
+            this._setPromptStatus(`重置失败: ${e.message}`, "#e53935");
+            this.logTerminal.progressEnd("reset", "ERR", `重置跟踪失败: ${e.message}`);
+        } finally {
+            this.els.btnResetTracking.disabled = false;
+            this._updatePromptButtons();
+        }
     }
 
     // ─── Tracklet List ──────────────────────────────────────────────
@@ -858,20 +898,30 @@ class AnnotationApp {
         this.els.resultInfo.innerHTML =
             `<p class="hint">共 ${sorted.length} 个目标</p>`;
 
-        const typeNames = { text: "文本", point: "点", box: "框" };
+        const typeNames = { point: "点", box: "框" };
         for (const t of sorted) {
             const color = this.maskOverlay.getObjectColor(t.id);
             const item = document.createElement("div");
             item.className = "tracklet-item";
+            item.title = `点击选中 #${t.id}：填点/框后预览即可精修该目标`;
             item.innerHTML = `
                 <span class="box-color" style="background:${color.hex}"></span>
                 <span class="tracklet-info">
                     <strong>#${t.id}</strong> ${t.className}
                     <span class="tracklet-meta">${typeNames[t.promptType] || t.promptType} · 帧${t.frameIdx}</span>
                 </span>
-                <span class="tracklet-delete" data-id="${t.id}" title="删除">&times;</span>
+                <span class="tracklet-delete" data-id="${t.id}" title="删除该目标：移除它的提示与全部帧的跟踪结果，不可恢复、不可撤销">&times;</span>
             `;
-            item.querySelector(".tracklet-delete").addEventListener("click", () => {
+            // Clicking a list entry selects that id for refinement
+            item.addEventListener("click", () => {
+                this.els.trackletIdInput.value = t.id;
+                this._setPromptStatus(
+                    `已选中 #${t.id}：填写点/框后预览即可精修该目标`,
+                    "var(--accent)"
+                );
+            });
+            item.querySelector(".tracklet-delete").addEventListener("click", (e) => {
+                e.stopPropagation();
                 this._removeTracklet(t.id);
             });
             listEl.appendChild(item);
@@ -1027,6 +1077,18 @@ class AnnotationApp {
         };
 
         this._playTimer = setInterval(playStep, interval);
+
+        // Warm the mask cache ahead of the playhead: the per-step prefetch
+        // in onFrameChange only looks one frame ahead, so the first steps
+        // would otherwise outrun the in-flight fetch and blank the overlay
+        // until each frame's mask arrives (e.g. right after an object
+        // removal evicted the whole cache).
+        if (this.sessionId) {
+            const cur = this.player.getCurrentFrame();
+            for (let i = 1; i <= 5; i++) {
+                this.maskOverlay.prefetchMask(cur + i);
+            }
+        }
     }
 
     _stopPlay() {
@@ -1066,8 +1128,12 @@ class AnnotationApp {
         this.els.btnNext.disabled = true;
         this.els.btnPlay.disabled = true;
 
-        // Reset mask overlay state
+        // Reset mask overlay state, then immediately re-fetch the current
+        // frame from the tracker (prompt frames hold fresh temp outputs):
+        // without this the masks the user is looking at blank out until
+        // the propagation loop wraps around to this frame
         this.maskOverlay.reset();
+        this.maskOverlay.fetchAndDisplayMask(this.player.getCurrentFrame());
 
         this.logTerminal.progressStart(
             "prop", `${dirNames[direction]}跟踪 ${this.numFrames} 帧`
@@ -1081,10 +1147,24 @@ class AnnotationApp {
             },
             onPropagationStart: (totalFrames, data) => {
                 const dir = dirNames[(data && data.direction) || direction] || direction;
-                this.els.progressText.textContent = `0 / ${totalFrames}`;
+                const expected = (data && data.expected_total) || totalFrames;
+                const plan = (data && data.plan) || null;
+                this._propPlan = plan;
+                this._propExpectedTotal = expected;
+                this._propSegmentCounts = { forward: 0, backward: 0, backfill: 0 };
+                this.els.progressText.textContent = `0 / ${expected}`;
                 this.els.progressFill.style.width = "0%";
                 this.els.resultInfo.innerHTML =
-                    `<p class="hint">${dir}跟踪 ${totalFrames} 帧中...</p>`;
+                    `<p class="hint">${dir}跟踪 ${totalFrames} 帧中...` +
+                    (plan ? `（前向 ${plan.forward || 0} + 后向 ${plan.backward || 0}` +
+                        (plan.backfill ? ` + 补齐 ${plan.backfill}` : "") +
+                        " 项）" : "") +
+                    `</p>`;
+                this.logTerminal.log(
+                    "INFO",
+                    `${dir}跟踪开始：总工作量 ${expected} 项` +
+                    (plan ? `（前向 ${plan.forward || 0}，后向 ${plan.backward || 0}，补齐 ${plan.backfill || 0}）` : "")
+                );
             },
             onFrameResult: (data) => {
                 // Store the mask for this frame
@@ -1094,29 +1174,60 @@ class AnnotationApp {
                     data.out_obj_ids
                 );
 
-                // Update progress
-                const total = this.numFrames;
-                const processed = Math.round(data.progress * total);
-                this.els.progressFill.style.width = `${data.progress * 100}%`;
-                this.els.progressText.textContent = `${processed} / ${total}`;
+                // Update progress against the real budget (plan), not the
+                // video frame count: "both" runs forward + backward
+                // segments plus a backfill pass, which together exceed the
+                // video length (the old counter hit a fake 100% after the
+                // forward segment)
+                const seg = data.segment || "forward";
+                this._propSegmentCounts[seg] =
+                    (this._propSegmentCounts[seg] || 0) + 1;
+                const expected = data.expected_total ||
+                    this._propExpectedTotal || this.numFrames;
+                const sent = data.sent_count ||
+                    Object.values(this._propSegmentCounts)
+                        .reduce((a, b) => a + b, 0);
+                const pct = Math.min(100, (sent / expected) * 100);
+                this.els.progressFill.style.width = `${pct}%`;
+                this.els.progressText.textContent = `${sent} / ${expected}`;
 
-                // Terminal progress line: throttled in-place update
+                // Terminal progress line: throttled in-place update with
+                // per-segment breakdown
                 const now = performance.now();
-                if (now - this._lastPropLogTs >= 500 || data.progress >= 1.0) {
+                if (now - this._lastPropLogTs >= 500 || pct >= 100) {
                     this._lastPropLogTs = now;
+                    const segNames = {
+                        forward: "前向", backward: "后向", backfill: "补齐",
+                    };
+                    const segParts = Object.entries(this._propSegmentCounts)
+                        .filter(([, c]) => c > 0)
+                        .map(([s, c]) =>
+                            `${segNames[s] || s} ${c}/${
+                                (this._propPlan && this._propPlan[s]) || "?"}`);
                     this.logTerminal.progressUpdate(
-                        "prop", Math.round(data.progress * 100),
-                        `${dirNames[direction]}跟踪 ${processed} / ${total} 帧`
+                        "prop", Math.round(pct),
+                        `${dirNames[direction]}跟踪 ${sent}/${expected}（${segParts.join(" · ")}）`
                     );
                 }
             },
-            onPropagationComplete: (totalFrames) => {
+            onPropagationComplete: (totalFrames, data) => {
+                const expected = (data && data.expected_total) || totalFrames;
+                const segCounts = (data && data.segment_counts) || null;
+                const segParts = segCounts
+                    ? Object.entries(segCounts)
+                        .filter(([, c]) => c > 0)
+                        .map(([s, c]) =>
+                            `${{forward: "前向", backward: "后向", backfill: "补齐"}[s] || s} ${c}`)
+                        .join(" · ")
+                    : "";
                 this.els.progressFill.style.width = "100%";
-                this.els.progressText.textContent = `${totalFrames} / ${totalFrames}`;
+                this.els.progressText.textContent = `${expected} / ${expected}`;
                 this.els.resultInfo.innerHTML =
                     `<p class="hint" style="color:#4caf50">跟踪完成: ${totalFrames} 帧，可播放预览</p>`;
                 this.logTerminal.progressEnd(
-                    "prop", "OK", `${dirNames[direction]}跟踪完成: ${totalFrames} 帧`
+                    "prop", "OK",
+                    `${dirNames[direction]}跟踪完成: ${totalFrames} 帧` +
+                    (segParts ? `（${segParts}）` : "")
                 );
 
                 this._endPropagation();
@@ -1202,7 +1313,7 @@ class AnnotationApp {
                 const resp = await fetch(url);
                 const data = await resp.json();
                 this.els.gpuStatus.textContent =
-                    `GPU: ${data.gpu_used_pct.toFixed(0)}% ` +
+                    `GPU${data.gpu_index ?? ""}: ${data.gpu_used_pct.toFixed(0)}% ` +
                     `(${data.gpu_free_mb.toFixed(0)}MB 空闲)`;
                 if (this.sessionId) {
                     this.els.sessionStatus.textContent =

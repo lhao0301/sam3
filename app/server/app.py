@@ -1,15 +1,24 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates. All Rights Reserved
 
-"""FastAPI application entry point.
+"""FastAPI application entry point (SAM2-task mode).
 
 Provides:
-- REST endpoints for session management and prompt addition
+- REST endpoints for session management and prompt submission
 - WebSocket endpoint for streaming propagation results
 - Static file serving for the frontend
 - CORS for cross-origin access (frontend on a different machine)
 
+Inference runs on the SAM2-task tracker (``Sam3TrackerPredictor`` inside
+the SAM3 checkpoint): prompts are incremental (no reset / replay), every
+object carries a user-specified id, and points + boxes may be combined.
+
 Usage:
     conda run -n sam3 uvicorn app.server.app:app --host 0.0.0.0 --port 8000
+
+GPU selection happens automatically at import time (app/server/__init__.py
+calls gpu_utils.configure_gpu BEFORE torch/CUDA is initialized): the card
+with the most free memory wins. Set SAM3_GPU=<index> (or CUDA_VISIBLE_DEVICES
+in the launcher) to pin a specific card instead.
 """
 
 import os
@@ -25,18 +34,19 @@ from fastapi.staticfiles import StaticFiles
 
 from sam3.logger import get_logger
 
-from .frame_utils import extract_frames, get_frame_path, get_frames_dir, cleanup_session_frames
-from .mask_utils import render_masks_only, get_color_for_obj_id
+from .frame_utils import extract_frames, get_frames_dir, cleanup_session_frames
+from .mask_utils import render_masks_only
 from .session_manager import SessionManager
-from .sam3_service import Sam3Service
+from .sam2_service import Sam2TrackerService
 from .ws_manager import WSManager
+from . import SELECTED_GPU
 
 logger = get_logger(__name__)
 
 
 def _render_prompt_frame_outputs(outputs: dict, info) -> dict:
-    """Extract obj ids / boxes / rendered mask PNG from an add_prompt or
-    remove_object response for a prompt frame."""
+    """Extract obj ids / boxes / rendered mask PNG from a prompt or mask
+    response for a prompt frame."""
     import numpy as np
 
     obj_ids = outputs.get("out_obj_ids", [])
@@ -70,44 +80,17 @@ def _render_prompt_frame_outputs(outputs: dict, info) -> dict:
     return {"obj_ids": obj_ids_list, "boxes_xywh": boxes_list, "mask_png": mask_png}
 
 
-def _to_jsonable(obj):
-    """Recursively convert numpy/tensor objects to JSON-serializable types."""
-    import numpy as np
-    import torch
-    if isinstance(obj, dict):
-        return {k: _to_jsonable(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return [_to_jsonable(v) for v in obj]
-    elif isinstance(obj, (np.ndarray,)):
-        return obj.tolist()
-    elif isinstance(obj, (np.integer,)):
-        return int(obj)
-    elif isinstance(obj, (np.floating,)):
-        return float(obj)
-    elif isinstance(obj, (np.bool_,)):
-        return bool(obj)
-    elif isinstance(obj, torch.Tensor):
-        return obj.detach().cpu().tolist()
-    elif hasattr(obj, 'item') and callable(obj.item):
-        try:
-            return obj.item()
-        except Exception:
-            pass
-    return obj
-
 # Configuration
-MODEL_VERSION = os.environ.get("SAM3_MODEL_VERSION", "sam3")
 MAX_CONCURRENT_SESSIONS = int(os.environ.get("SAM3_MAX_SESSIONS", "4"))
 MAX_CONCURRENT_INFERENCE = int(os.environ.get("SAM3_MAX_INFERENCE", "1"))
 CHECKPOINT_PATH = os.environ.get("SAM3_CHECKPOINT_PATH", "")
 UPLOAD_DIR = Path("/tmp/sam3_uploads")
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
-# Frontend terminal logs are persisted here (one file per day)
 LOG_DIR = Path(os.environ.get("SAM3_LOG_DIR", "logs"))
 
 # Global instances
 session_manager: SessionManager = None
-sam3_service: Sam3Service = None
+sam2_service: Sam2TrackerService = None
 ws_manager: WSManager = None
 
 
@@ -121,36 +104,42 @@ def _purge_stale_tmp_dirs():
 
 
 async def _close_session_full(session_id: str):
-    """Close the SAM3 session, drop metadata and delete the frames dir."""
-    await sam3_service.close_session(session_id)
+    """Close the tracker session, drop metadata and delete the frames dir."""
+    await sam2_service.close_session(session_id)
     session_manager.remove_session(session_id)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
-    global session_manager, sam3_service, ws_manager
+    global session_manager, sam2_service, ws_manager
 
     # Startup: reset all state left over from a previous run
     _purge_stale_tmp_dirs()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logger.info("Initializing SAM3 annotation service...")
+    logger.info("Initializing SAM3 annotation service (SAM2-task mode)...")
 
-    sam3_service = Sam3Service(
-        model_version=MODEL_VERSION,
+    # The GPU was already picked and pinned via CUDA_VISIBLE_DEVICES at
+    # package import time (app/server/__init__.py): importing the sam3
+    # package initializes CUDA, which pins the process to a device —
+    # at that point it must already point at the idlest card.
+    logger.info(f"Service runs on GPU {SELECTED_GPU}")
+
+    sam2_service = Sam2TrackerService(
         max_concurrent_inference=MAX_CONCURRENT_INFERENCE,
         checkpoint_path=CHECKPOINT_PATH or None,
     )
 
     async def _expire_session(sid: str):
-        """Release the SAM3 inference state (GPU memory, prompt history)
+        """Release the tracker inference state (GPU memory, prompt log)
         together with the session metadata and frames on expiry."""
         await _close_session_full(sid)
 
     session_manager = SessionManager(
         max_concurrent_sessions=MAX_CONCURRENT_SESSIONS,
         on_session_expired=_expire_session,
+        gpu_index=SELECTED_GPU,
     )
     ws_manager = WSManager()
 
@@ -165,9 +154,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="SAM3 Video Annotation Service",
+    title="SAM3 Video Annotation Service (SAM2-task mode)",
     description="Frontend-backend separated video annotation system using SAM3",
-    version="1.0.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -196,101 +185,6 @@ async def get_status(session_id: str = None):
     return JSONResponse(session_manager.get_gpu_status())
 
 
-@app.get("/api/debug/mem")
-async def debug_memory():
-    """Detailed GPU memory breakdown for debugging."""
-    import torch
-
-    # PyTorch allocator stats
-    alloc = torch.cuda.memory_allocated(0)
-    reserved = torch.cuda.memory_reserved(0)
-    max_alloc = torch.cuda.max_memory_allocated(0)
-    max_reserved = torch.cuda.max_memory_reserved(0)
-
-    # Per-session breakdown
-    sessions = []
-    for sid, session in sam3_service._predictor._all_inference_states.items():
-        state = session["state"]
-        num_frames = state.get("num_frames", 0)
-
-        # precomputed_vit size
-        pcv = state.get("feature_cache", {}).get("precomputed_vit")
-        pcv_gb = 0.0
-        pcv_shape = None
-        if pcv is not None:
-            pcv_bytes = sum(
-                f.element_size() * f.nelement() for f in pcv
-            )
-            pcv_gb = pcv_bytes / 1024**3
-            pcv_shape = [list(f.shape) for f in pcv]
-
-        # cached_frame_outputs size
-        cached = state.get("cached_frame_outputs", {})
-        cached_frames = len(cached)
-        cached_gb = 0.0
-        for fidx, m in cached.items():
-            for oid, mask in m.items():
-                if hasattr(mask, "element_size"):
-                    cached_gb += mask.element_size() * mask.nelement()
-        cached_gb /= 1024**3
-
-        # output_dict size (raw predictions)
-        out_dict = state.get("output_dict", {})
-        od_frames = sum(
-            len(v) for v in out_dict.values() if isinstance(v, dict)
-        )
-
-        # obj_ids
-        obj_ids = state.get("obj_ids", [])
-
-        # img_batch type
-        img_batch = state.get("input_batch", None)
-        if img_batch is not None:
-            ib = img_batch.img_batch
-            ib_type = type(ib).__name__
-        else:
-            ib_type = "N/A"
-
-        # tracker states
-        tracker_states = state.get("tracker_inference_states", [])
-        num_tracker_states = len(tracker_states)
-
-        sessions.append({
-            "session_id": sid[:12] + "...",
-            "num_frames": num_frames,
-            "img_batch_type": ib_type,
-            "precomputed_vit_gb": round(pcv_gb, 3),
-            "precomputed_vit_shape": pcv_shape,
-            "cached_frame_outputs": {
-                "frames_with_masks": cached_frames,
-                "total_mask_gb": round(cached_gb, 3),
-            },
-            "output_dict_frames": od_frames,
-            "num_obj_ids": len(obj_ids),
-            "num_tracker_states": num_tracker_states,
-        })
-
-    # Model param count
-    model = sam3_service._predictor.model
-    total_params = sum(p.numel() for p in model.parameters())
-    param_gb = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024**3
-
-    return JSONResponse({
-        "pytorch": {
-            "allocated_gb": round(alloc / 1024**3, 3),
-            "reserved_gb": round(reserved / 1024**3, 3),
-            "max_allocated_gb": round(max_alloc / 1024**3, 3),
-            "max_reserved_gb": round(max_reserved / 1024**3, 3),
-            "fragmentation_gb": round((reserved - alloc) / 1024**3, 3),
-        },
-        "model": {
-            "total_params_M": round(total_params / 1e6, 1),
-            "params_gb": round(param_gb, 3),
-        },
-        "sessions": sessions,
-    })
-
-
 @app.post("/api/upload")
 async def upload_video(file: UploadFile = File(...)):
     """Upload a video file. Returns the saved path for later session creation."""
@@ -300,11 +194,23 @@ async def upload_video(file: UploadFile = File(...)):
         if ext not in (".mp4", ".avi", ".mov", ".mkv", ".webm"):
             raise HTTPException(status_code=400, detail="File must be a video")
 
-    upload_path = UPLOAD_DIR / file.filename
+    # Store under a unique generated name, NOT the original filename:
+    # two sessions uploading files with the same name would otherwise
+    # clobber each other (the second upload overwrites the first session's
+    # video while its frame extraction may still be reading it). This also
+    # neutralizes path-like or non-ASCII filenames. The original name is
+    # still returned as `filename` for display.
+    import uuid
+
+    store_ext = Path(file.filename).suffix.lower() or ".mp4"
+    upload_path = UPLOAD_DIR / f"{uuid.uuid4().hex[:12]}{store_ext}"
     with open(upload_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    logger.info(f"Uploaded video saved to {upload_path}")
+    logger.info(
+        f"Uploaded video saved to {upload_path} "
+        f"(original filename: {file.filename!r})"
+    )
     return {"filename": file.filename, "path": str(upload_path)}
 
 
@@ -318,8 +224,8 @@ async def start_session(request: dict):
             "video_filename": "xxx.mp4"  // optional, for display
         }
 
-    Extracts video frames into a per-session JPEG folder, then starts
-    a SAM3 session with that folder as the resource_path.
+    Extracts video frames into a per-session JPEG folder, then starts a
+    SAM2-task tracker session with that folder as resource_path.
 
     Returns:
         {
@@ -362,16 +268,12 @@ async def start_session(request: dict):
         cleanup_session_frames(temp_session_id)
         raise HTTPException(status_code=503, detail=str(e))
 
-    # Step 4: Start SAM3 session with the frames directory
+    # Step 4: Start tracker session with the frames directory
     try:
-        await sam3_service.start_session(
-            session_id=session_id,
-            resource_path=frames_dir,
-            resource_type="image_folder",
-        )
+        await sam2_service.start_session(session_id, frames_dir)
     except Exception as e:
         session_manager.remove_session(session_id)
-        raise HTTPException(status_code=500, detail=f"SAM3 start_session failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Tracker start_session failed: {e}")
 
     return {
         "session_id": session_id,
@@ -383,197 +285,179 @@ async def start_session(request: dict):
 
 @app.post("/api/prompt/add")
 async def add_prompt(request: dict):
-    """Add a text / point / box prompt to a session (preview == commit).
+    """Add a point / box / point+box prompt for one object on one frame.
 
-    One target per request. The tracklet id is user-specified for point
-    prompts (obj_id) and box prompts (box_labels), and auto-assigned by
-    SAM3 for text prompts (open-vocabulary detection, possibly multiple
-    instances).
+    The obj_id is always user-specified: a new id registers a new object,
+    an existing id refines that object's mask on this frame. Submissions
+    are incremental (no reset) and points + boxes may be combined.
 
     Request body:
         {
             "session_id": "uuid",
             "frame_idx": 0,
-            "prompt_type": "box" | "point" | "text",
-            // box prompt (normalized [0,1], one box per request):
-            "boxes": [[x, y, w, h]],
-            "box_labels": [tracklet_id],
-            // point prompt (normalized [0,1], one target per request):
+            "obj_id": 1,
+            // any of the following (at least one), coordinates in [0,1]:
             "points": [[x, y], ...],
             "point_labels": [1, 0, ...],       // 1=positive, 0=negative
-            "obj_id": tracklet_id,
-            // text prompt:
-            "text": "the red car"
+            "box": [x, y, w, h]                // normalized xywh
         }
 
     Returns:
         {
             "session_id": "uuid",
             "frame_idx": 0,
-            "obj_ids": [1],
-            "boxes_xywh": [[x, y, w, h]],
-            "mask_png": "base64 ..."          // masks on the prompt frame
+            "new_obj_ids": [1],
+            "obj_ids": [1],                    // all objects on this frame
+            "boxes_xywh": [[x, y, w, h]],      // normalized tight boxes
+            "mask_png": "base64 ..."           // masks on the prompt frame
         }
     """
     session_id = request.get("session_id")
     frame_idx = int(request.get("frame_idx", 0))
-    prompt_type = request.get("prompt_type", "box")
+    obj_id = request.get("obj_id")
 
     info = session_manager.get_session(session_id)
     if info is None:
         raise HTTPException(status_code=404, detail="Session not found")
+    if obj_id is None:
+        raise HTTPException(status_code=400, detail="obj_id is required")
+    obj_id = int(obj_id)
 
-    # Build the prompt dict in PromptHistory's documented format. Tracklet
-    # ids are user-specified for point prompts and auto-assigned by SAM3 for
-    # text / box detection prompts.
-    prompt = {"type": prompt_type, "frame_idx": frame_idx}
-    if prompt_type == "box":
-        boxes = request.get("boxes", [])
-        box_labels = request.get("box_labels", [])
-        if not boxes:
-            raise HTTPException(status_code=400, detail="boxes is required for box prompt")
-        if len(boxes) != len(box_labels):
-            raise HTTPException(
-                status_code=400, detail="boxes and box_labels must have same length"
-            )
-        prompt["boxes"] = boxes
-        prompt["box_labels"] = [int(l) for l in box_labels]
-    elif prompt_type == "point":
-        points = request.get("points", [])
-        point_labels = request.get("point_labels", [])
-        obj_id = request.get("obj_id")
-        if not points:
-            raise HTTPException(status_code=400, detail="points is required for point prompt")
-        if len(points) != len(point_labels):
+    points = request.get("points")
+    point_labels = request.get("point_labels")
+    box = request.get("box")
+
+    if points is not None:
+        if point_labels is None or len(points) != len(point_labels):
             raise HTTPException(
                 status_code=400, detail="points and point_labels must have same length"
             )
-        if obj_id is None:
-            raise HTTPException(status_code=400, detail="obj_id is required for point prompt")
-        prompt["points"] = points
-        prompt["point_labels"] = [int(l) for l in point_labels]
-        prompt["obj_id"] = int(obj_id)
-    elif prompt_type == "text":
-        text = (request.get("text") or "").strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="text is required for text prompt")
-        prompt["text"] = text
-    else:
-        raise HTTPException(status_code=400, detail=f"invalid prompt_type: {prompt_type}")
+        points = [[float(x), float(y)] for x, y in points]
+        point_labels = [int(l) for l in point_labels]
+    if box is not None:
+        if len(box) != 4:
+            raise HTTPException(status_code=400, detail="box must be [x, y, w, h]")
+        box = [float(v) for v in box]
+    if not points and box is None:
+        raise HTTPException(
+            status_code=400, detail="at least one of points or box is required"
+        )
 
     try:
-        outputs = await sam3_service.submit_prompt(session_id, info, prompt)
-    except HTTPException:
-        raise
+        result = await sam2_service.submit_prompt(
+            session_id=session_id,
+            frame_idx=frame_idx,
+            obj_id=obj_id,
+            points=points,
+            point_labels=point_labels if points else None,
+            box=box,
+        )
+    except PermissionError as e:
+        # propagation started; brand-new objects need reset_tracking first
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
-        info.prompt_history.clear_pending()
         raise HTTPException(
             status_code=500,
             detail=f"add_prompt failed: {type(e).__name__}: {e}",
         )
 
-    rendered = _render_prompt_frame_outputs(outputs, info)
-
-    # Ids newly introduced by this submission (for the frontend pending set)
-    if prompt_type == "point":
-        new_obj_ids = [prompt["obj_id"]]
-    else:
-        new_obj_ids = list(info.prompt_history.pending.get("assigned_ids", []))
-
+    rendered = _render_prompt_frame_outputs(result["outputs"], info)
     info.touch()
     return {
         "session_id": session_id,
         "frame_idx": frame_idx,
-        "new_obj_ids": new_obj_ids,
+        "new_obj_ids": [obj_id],
         **rendered,
     }
 
 
 @app.post("/api/prompt/confirm")
 async def confirm_prompt(request: dict):
-    """Confirm the previewed prompt: it joins the confirmed set that gets
-    replayed on every subsequent submission."""
+    """Confirm the previewed prompt.
+
+    In SAM2-task mode submissions are already applied to the tracker
+    state, so this is pure bookkeeping (kept for frontend compatibility).
+    """
     session_id = request.get("session_id")
     info = session_manager.get_session(session_id)
     if info is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    result = await sam3_service.confirm_pending(session_id, info)
     info.touch()
-    return {"session_id": session_id, **result}
+    return {"session_id": session_id, "confirmed": True}
 
 
 @app.delete("/api/prompt/{session_id}/pending")
-async def cancel_pending(session_id: str):
-    """Undo the previewed prompt and restore the confirmed state."""
+async def cancel_pending(session_id: str, obj_id: int, frame_idx: int):
+    """Undo the previewed prompt for obj_id on frame_idx.
+
+    Restores the previous prompt version of that object/frame (if any);
+    removes the object entirely when nothing is left.
+    """
     info = session_manager.get_session(session_id)
     if info is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        outputs = await sam3_service.cancel_pending(session_id, info)
+        result = await sam2_service.undo_prompt(
+            session_id, obj_id=int(obj_id), frame_idx=int(frame_idx)
+        )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"cancel failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"undo failed: {type(e).__name__}: {e}"
+        )
 
-    rendered = _render_prompt_frame_outputs(outputs, info)
+    rendered = _render_prompt_frame_outputs(result, info)
     info.touch()
     return {
         "session_id": session_id,
-        "frame_idx": info.prompt_history.det_frame,
+        "frame_idx": result["frame_index"],
         **rendered,
     }
 
 
 @app.delete("/api/prompt/{session_id}/{obj_id}")
 async def remove_object(session_id: str, obj_id: int):
-    """Remove a confirmed tracklet and restore the remaining state."""
+    """Remove a tracked object (tracker state + prompt records)."""
     info = session_manager.get_session(session_id)
     if info is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        outputs = await sam3_service.remove_tracklet(session_id, info, obj_id)
+        result = await sam2_service.remove_object(session_id, int(obj_id))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"remove_object failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"remove_object failed: {type(e).__name__}: {e}"
+        )
 
-    rendered = _render_prompt_frame_outputs(outputs, info)
+    rendered = _render_prompt_frame_outputs(result, info)
     info.touch()
     return {
         "session_id": session_id,
-        "frame_idx": info.prompt_history.det_frame,
+        "frame_idx": result["frame_index"],
         **rendered,
     }
 
 
-@app.post("/api/encode/{session_id}")
-async def encode_features(session_id: str):
-    """Pre-compute ViT backbone features for all frames in a session.
+@app.post("/api/session/{session_id}/reset-tracking")
+async def reset_tracking(session_id: str):
+    """Clear all tracking results and replay the submitted prompts.
 
-    Runs the ViT trunk on every video frame and caches the raw outputs so
-    that subsequent prompt additions and propagations skip the expensive ViT
-    forward pass and only run the lightweight FPN neck per frame.
-
-    Returns:
-        {"session_id": "...", "num_frames_encoded": N}
+    Afterwards new objects can be added again (before the next
+    propagation). The propagation itself has to be redone.
     """
     info = session_manager.get_session(session_id)
     if info is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if info.is_encoded:
-        return {
-            "session_id": session_id,
-            "num_frames_encoded": info.num_frames,
-            "already_encoded": True,
-        }
-
     try:
-        result = await sam3_service.encode_features(session_id)
-        info.is_encoded = True
-        info.touch()
+        result = await sam2_service.reset_tracking(session_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"encode_features failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"reset_tracking failed: {type(e).__name__}: {e}"
+        )
 
+    info.touch()
     return {"session_id": session_id, **result}
 
 
@@ -629,7 +513,7 @@ async def close_session_beacon(session_id: str):
     """Beacon-compatible session close (navigator.sendBeacon can only POST).
 
     Sent by the frontend on pagehide so closing the tab releases the
-    SAM3 state, prompt history and frame files immediately. Idempotent:
+    tracker state, prompt log and frame files immediately. Idempotent:
     a no-op when the session is already gone (e.g. the expiry cleanup
     raced the beacon).
     """
@@ -653,7 +537,7 @@ async def get_session_info(session_id: str):
         "orig_height": info.orig_height,
         "orig_width": info.orig_width,
         "is_propagating": info.is_propagating,
-        "is_encoded": info.is_encoded,
+        "tracking_started": sam2_service.is_tracking_started(session_id),
     }
 
 
@@ -719,20 +603,22 @@ async def get_thumbnail(session_id: str, frame_idx: int, w: int = 160):
 async def get_mask(session_id: str, frame_idx: int):
     """Get the mask overlay for a specific frame as a base64 PNG.
 
-    Retrieves cached masks from SAM3's inference state after propagation
-    and renders them as a transparent PNG overlay.
+    Reads the tracker's per-frame outputs (conditioning and tracked
+    results) and renders them as a transparent PNG overlay.
     """
     info = session_manager.get_session(session_id)
     if info is None:
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        result = await sam3_service.get_frame_masks(session_id, frame_idx)
+        result = await sam2_service.get_frame_masks(session_id, frame_idx)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"get_frame_masks failed: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"get_frame_masks failed: {type(e).__name__}: {e}"
+        )
 
-    obj_ids = result.get("obj_ids", [])
-    binary_masks = result.get("binary_masks", [])
+    obj_ids = result.get("out_obj_ids", [])
+    binary_masks = result.get("out_binary_masks", [])
 
     mask_png = None
     if binary_masks and len(obj_ids) > 0:
@@ -756,8 +642,8 @@ async def get_mask(session_id: str, frame_idx: int):
 async def export_video(session_id: str):
     """Export the annotated video with mask overlays as an MP4 file.
 
-    Composites each frame with its cached masks (from propagation) and
-    writes the result to a video file. Returns the file for download.
+    Composites each frame with its tracked masks and writes the result
+    to a video file. Returns the file for download.
 
     Returns:
         FileResponse with the MP4 video.
@@ -767,7 +653,7 @@ async def export_video(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
 
     try:
-        output_path = await sam3_service.export_video(
+        output_path = await sam2_service.export_video(
             session_id=session_id,
             frames_dir=info.frames_dir,
             num_frames=info.num_frames,
@@ -793,19 +679,19 @@ async def ws_propagate(websocket: WebSocket, session_id: str):
     """WebSocket endpoint for streaming propagation results.
 
     Client sends JSON messages:
-        {"type": "start"}    - begin propagation
+        {"type": "start", "direction": "forward"|"backward"|"both"}
         {"type": "cancel"}   - cancel ongoing propagation
         {"type": "ping"}     - health check
 
     Server sends JSON messages:
-        {"type": "propagation_started", "total_frames": N}
+        {"type": "propagation_started", "total_frames": N, "direction": "..."}
         {"type": "frame_result", "frame_index": i, "mask_png": "...", "progress": 0.5}
         {"type": "propagation_complete", "total_frames": N}
         {"type": "cancelled"}
         {"type": "error", "message": "..."}
     """
     await ws_manager.handle_connection(
-        websocket, session_id, sam3_service, session_manager
+        websocket, session_id, sam2_service, session_manager
     )
 
 

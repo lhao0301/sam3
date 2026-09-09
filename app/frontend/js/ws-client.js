@@ -126,7 +126,9 @@ class WSClient {
 
             case "propagation_complete":
                 if (this.callbacks.onPropagationComplete) {
-                    this.callbacks.onPropagationComplete(data.total_frames);
+                    this.callbacks.onPropagationComplete(
+                        data.total_frames, data
+                    );
                 }
                 break;
 

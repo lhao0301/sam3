@@ -172,12 +172,17 @@ class WSManager:
         direction: "forward" (prompt frame -> end), "backward"
         (prompt frame -> start) or "both".
 
+        Progress is reported against the propagation plan (forward +
+        backward + backfill budget) rather than the video's frame count,
+        so "both" propagation no longer shows a fake 100% while the
+        backward segment is still running.
+
         For each frame, sends a JSON message with:
         - frame_index: int
+        - segment: "forward" | "backward" | "backfill"
         - out_obj_ids: list of int
-        - out_boxes_xywh: list of [x, y, w, h] normalized
         - mask_png: base64-encoded transparent PNG overlay
-        - progress: float (0..1)
+        - progress: float (0..1, relative to the plan)
         """
         info = session_manager.get_session(session_id)
         if info is None:
@@ -188,13 +193,24 @@ class WSManager:
             return
 
         info.is_propagating = True
-        total_frames = info.num_frames
+        try:
+            plan = sam3_service.get_propagation_plan(session_id, direction)
+        except Exception:
+            plan = {}
+        expected_total = plan.get("expected_total", info.num_frames) or info.num_frames
         sent_count = 0
+        segment_counts = {"forward": 0, "backward": 0, "backfill": 0}
 
+        logger.info(
+            f"Propagation '{direction}' starting for session {session_id[:8]} "
+            f"(plan: {plan})"
+        )
         await websocket.send_json({
             "type": "propagation_started",
-            "total_frames": total_frames,
+            "total_frames": info.num_frames,
             "direction": direction,
+            "plan": plan,
+            "expected_total": expected_total,
         })
 
         try:
@@ -202,11 +218,11 @@ class WSManager:
                 session_id, direction=direction
             ):
                 frame_idx = frame_result.get("frame_index", sent_count)
+                segment = frame_result.get("segment") or "forward"
                 outputs = frame_result.get("outputs", {})
 
                 obj_ids = outputs.get("out_obj_ids", [])
                 binary_masks = outputs.get("out_binary_masks", [])
-                boxes_xywh = outputs.get("out_boxes_xywh", [])
 
                 # Render mask overlay as transparent PNG
                 mask_png = None
@@ -222,15 +238,6 @@ class WSManager:
                     except Exception as e:
                         logger.warning(f"Mask rendering failed for frame {frame_idx}: {e}")
 
-                # Convert masks to list for JSON (they may be numpy arrays)
-                masks_list = []
-                if binary_masks is not None:
-                    for m in binary_masks:
-                        if hasattr(m, "tolist"):
-                            masks_list.append(m.tolist())
-                        else:
-                            masks_list.append(m)
-
                 # Convert obj_ids to list
                 obj_ids_list = []
                 for oid in obj_ids:
@@ -239,34 +246,37 @@ class WSManager:
                     else:
                         obj_ids_list.append(int(oid))
 
-                # Convert boxes to list
-                boxes_list = []
-                for box in boxes_xywh:
-                    if hasattr(box, "tolist"):
-                        boxes_list.append(box.tolist())
-                    else:
-                        boxes_list.append(list(box))
-
                 sent_count += 1
+                segment_counts[segment] = segment_counts.get(segment, 0) + 1
                 self._propagation_counts[session_id] = sent_count
                 progress = (
-                    min(1.0, sent_count / total_frames) if total_frames > 0 else 0.0
+                    min(1.0, sent_count / expected_total)
+                    if expected_total > 0 else 0.0
                 )
 
                 msg = {
                     "type": "frame_result",
                     "frame_index": int(frame_idx),
+                    "segment": segment,
                     "out_obj_ids": obj_ids_list,
-                    "out_boxes_xywh": boxes_list,
                     "mask_png": mask_png,
                     "progress": round(progress, 4),
+                    "sent_count": sent_count,
+                    "expected_total": expected_total,
                 }
                 await websocket.send_json(msg)
 
             await websocket.send_json({
                 "type": "propagation_complete",
-                "total_frames": sent_count,
+                "total_frames": info.num_frames,
+                "sent_count": sent_count,
+                "expected_total": expected_total,
+                "segment_counts": segment_counts,
             })
+            logger.info(
+                f"Propagation '{direction}' streamed {sent_count}/{expected_total} "
+                f"items for session {session_id[:8]} (segments: {segment_counts})"
+            )
 
         except asyncio.CancelledError:
             logger.info(f"Propagation cancelled for session {session_id}")

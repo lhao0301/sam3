@@ -17,7 +17,6 @@ import torch
 from sam3.logger import get_logger
 
 from .frame_utils import cleanup_session_frames
-from .prompt_history import PromptHistory
 
 logger = get_logger(__name__)
 
@@ -46,8 +45,7 @@ class SessionInfo:
     last_active_at: float = field(default_factory=time.time)
     est_gpu_mem_mb: float = 0.0
     is_propagating: bool = False
-    is_encoded: bool = False
-    prompt_history: PromptHistory = field(default_factory=PromptHistory)
+    tracking_started: bool = False
 
     def touch(self):
         """Update last active time."""
@@ -66,10 +64,14 @@ class SessionManager:
         max_concurrent_sessions: int = 4,
         max_gpu_mem_pct: float = 90.0,
         on_session_expired: Optional[Callable[[str], Awaitable[None]]] = None,
+        gpu_index: Optional[int] = None,
     ):
         self._sessions: Dict[str, SessionInfo] = {}
         self._max_concurrent_sessions = max_concurrent_sessions
         self._max_gpu_mem_pct = max_gpu_mem_pct
+        # Physical index of the GPU the service runs on (chosen at startup
+        # by gpu_utils.configure_gpu; None when unknown / CPU-only)
+        self._gpu_index = gpu_index
         # Async callback invoked on expiry so the SAM3 inference state
         # (GPU memory, prompt history) is released together with the
         # session metadata and frames directory.
@@ -161,6 +163,7 @@ class SessionManager:
         return {
             "active_sessions": len(self._sessions),
             "max_sessions": self._max_concurrent_sessions,
+            "gpu_index": self._gpu_index,
             "gpu_free_mb": round(free_mb, 1),
             "gpu_total_mb": round(total_mb, 1),
             "gpu_used_mb": round(used_mb, 1),

@@ -14,27 +14,30 @@ import cv2
 import numpy as np
 
 # A palette of visually distinct colors for different objects.
-# Colors are in BGR format for OpenCV compatibility.
+# Triples are in BGR format for OpenCV compatibility; the color a mask
+# actually displays on screen is the triple read as RGB (e.g. the first
+# entry shows BLUE). The frontend (mask-overlay.js getObjectColor) mirrors
+# these displayed colors for the sidebar swatches.
 _COLOR_PALETTE = [
-    (255, 0, 0),      # red
+    (255, 0, 0),      # blue
     (0, 255, 0),      # green
-    (0, 0, 255),      # blue
+    (0, 0, 255),      # red
     (255, 255, 0),    # cyan
     (255, 0, 255),    # magenta
     (0, 255, 255),    # yellow
-    (128, 0, 0),      # maroon
+    (128, 0, 0),      # navy
     (0, 128, 0),      # dark green
-    (0, 0, 128),      # navy
-    (128, 128, 0),    # olive
+    (0, 0, 128),      # maroon
+    (128, 128, 0),    # teal
     (128, 0, 128),    # purple
-    (0, 128, 128),    # teal
-    (255, 128, 0),    # orange
-    (128, 255, 0),    # lime
-    (0, 128, 255),    # sky blue
-    (255, 0, 128),    # pink
+    (0, 128, 128),    # olive
+    (255, 128, 0),    # sky blue
+    (128, 255, 0),    # spring green
+    (0, 128, 255),    # orange
+    (255, 0, 128),    # violet
     (128, 255, 255),  # light yellow
-    (255, 128, 128),  # light red
-    (128, 128, 255),  # light blue
+    (255, 128, 128),  # light blue
+    (128, 128, 255),  # light red
     (200, 200, 200),  # gray
 ]
 

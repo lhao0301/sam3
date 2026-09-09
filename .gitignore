@@ -151,3 +151,20 @@ Thumbs.db
 # BPE vocabulary files
 *.bpe
 *.vocab
+
+# ---- Local annotation workspace (keep on disk, exclude from release) ----
+# IDE debug artifacts and verification screenshots
+.qoder/
+
+# Debug / runtime logs not covered by *.log
+strace.err
+strace.log
+nohup.out
+
+# Local hand-annotation test video (never publish)
+无悔追踪-4_x1.534_t2v_ref.mp4
+
+# Internal docs and one-off debug scripts
+app/REFACTOR_PROMPT.md
+SAM3_算法能力与模式说明.md
+monitor.sh
