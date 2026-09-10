@@ -6,6 +6,10 @@
 
 > 本仓库同时包含完整的 SAM 3 模型代码（`sam3/`），上游官方文档见 [facebookresearch/sam3](https://github.com/facebookresearch/sam3)；模型结构深度解析见 [sam3.md](sam3.md)（中文）。
 
+<p align="center">
+  <img src="assets/annotation/workflow-demo.gif" alt="标注流程演示：画框 → 预览 → 确认 → 点精修 → 传播跟踪" width="880" />
+</p>
+
 ---
 
 ## 功能维度总览
@@ -61,6 +65,10 @@
 | 标注视频导出 | 一键导出带掩码叠加的 MP4 标注视频 |
 | 会话信息查询 | 查询会话帧数、FPS、已确认目标等元信息 |
 
+掩码叠加效果：
+
+![掩码叠加预览](assets/annotation/mask-overlay.png)
+
 ### 6. 可观测性与运维
 
 | 功能 | 说明 |
@@ -107,13 +115,25 @@ uvicorn app.server.app:app --host 0.0.0.0 --port 8000
 
 ## 标注工作流
 
-1. **接入视频**：上传文件或输入服务器路径，服务自动抽帧
-2. **绘制提示**：默认框工具，拖拽框住目标；可叠加正/负点，`Delete` 删除选中提示
-3. **预览分割**：点击「分割预览」查看当前掩码，不满意可撤销点/整体撤销后重画
-4. **确认目标**：指定 tracklet id（可填类别名）后确认，加入目标列表
-5. **传播跟踪**：选择方向（正向/反向/双向）传播到全视频，进度实时流式展示
-6. **精修（可选）**：跳到任意帧补充点/框提示，再次预览确认；追加目标前先「重置跟踪」
-7. **导出**：下载带掩码叠加的标注 MP4，或按帧拉取 PNG 掩码
+**① 接入视频** — 上传文件或输入服务器路径，服务自动抽帧并生成缩略图条：
+
+![启动会话](assets/annotation/workflow-1-start.png)
+
+**② 绘制提示** — 默认框工具拖拽框住目标，可叠加正/负点组合（`Delete` 删除选中提示），同时指定类别名与 tracklet id：
+
+![框提示](assets/annotation/workflow-2-box-prompt.png)
+
+**③ 确认目标** — 「分割预览」查看掩码，满意后「确认」加入目标列表，可继续标注下一个目标：
+
+![确认目标](assets/annotation/workflow-3-confirm-tracklet.png)
+
+**④ 跨帧精修** — 跳到任意帧补充点/框提示，掩码实时叠加预览；追加新目标前先「重置跟踪」：
+
+![跨帧点精修](assets/annotation/workflow-4-point-refine.png)
+
+**⑤ 传播与导出** — 选择正向/反向/双向传播到全视频，进度经 WebSocket 实时流式展示，完成后一键导出标注 MP4；操作与推理日志实时显示在页面终端：
+
+![传播与终端日志](assets/annotation/workflow-5-terminal-logs.png)
 
 ## API 一览
 
