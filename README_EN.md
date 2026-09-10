@@ -257,4 +257,4 @@ SAM 3 paper and resources:
 
 ## License
 
-This repository is derived from Meta's [SAM 3](https://github.com/facebookresearch/sam3) and is released under the same [SAM License](LICENSE); the `app/` annotation tool is published under the same terms. For the original upstream README and contribution guidelines see [CONTRIBUTING.md](CONTRIBUTING.md).
+This repository is derived from Meta's [SAM 3](https://github.com/facebookresearch/sam3) and is released under the same [SAM License](LICENSE); the `app/` annotation tool is published under the same terms. The original upstream documentation is preserved in [README.md](README.md) (official SAM 3 README) and [CONTRIBUTING.md](CONTRIBUTING.md).

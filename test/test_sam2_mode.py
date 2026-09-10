@@ -12,13 +12,14 @@ import io
 import json
 import sys
 import time
+from pathlib import Path
 
 import requests
 import websocket
 
 BASE = "http://localhost:8000"
 WS_BASE = "ws://localhost:8000"
-VIDEO = "/data/luohao/project/sam3/assets/videos/bedroom.mp4"
+VIDEO = str(Path(__file__).resolve().parents[1] / "assets" / "videos" / "bedroom.mp4")
 
 PASSED = 0
 

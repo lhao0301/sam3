@@ -24,6 +24,7 @@ import io
 import json
 import sys
 import time
+from pathlib import Path
 
 import requests
 import websocket
@@ -201,7 +202,7 @@ check("frame 35 mask pixel count reasonable", px35 > 1000, f"({px35} px)")
 print("=== Step 5: server-side operation log lines ===")
 log_tail = ""
 try:
-    with open("/data/luohao/project/sam3/sam3_server.log", "r",
+    with open(Path(__file__).resolve().parents[1] / "sam3_server.log", "r",
               encoding="utf-8", errors="replace") as f:
         log_tail = f.read()[-20000:]
 except OSError:
