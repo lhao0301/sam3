@@ -103,19 +103,89 @@ Frontend/server split: the static frontend is served by FastAPI and can also be 
                                           (Sam3TrackerPredictor · SAM2-task mode)
 ```
 
-## Quick Start
+## Installation
+
+### Prerequisites
+
+- Linux (or macOS), NVIDIA GPU with CUDA 12.6+ drivers
+- Python ≥ 3.12, Conda, git
+
+### 1. Install the SAM 3 model package
+
+The annotation server reuses the `sam3` package shipped in this repository. Install it exactly as you would the upstream model:
 
 ```bash
-# 1. Install backend dependencies
+# 1a. Create an isolated environment
+conda create -n sam3 python=3.12
+conda activate sam3
+
+# 1b. Install PyTorch with CUDA support
+pip install torch==2.10.0 torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# 1c. Install the sam3 package (from the repository root)
+pip install -e .
+
+# 1d. (Optional) faster inference: FlashAttention-3 + optimized connected components
+pip install einops ninja
+pip install flash-attn-3 --no-deps --index-url https://download.pytorch.org/whl/cu128
+pip install git+https://github.com/ronghanghu/cc_torch.git
+```
+
+Extra dependency groups for notebooks and development (`pip install -e ".[notebooks]"`, `pip install -e ".[dev,train]"`) are described in the upstream [`README.md`](README.md#installation).
+
+### 2. Prepare the SAM 3 checkpoint
+
+Checkpoints are gated on Hugging Face — request access to [facebook/sam3](https://huggingface.co/facebook/sam3) (or [facebook/sam3.1](https://huggingface.co/facebook/sam3.1)) and authenticate once:
+
+```bash
+hf auth login   # paste a Hugging Face access token
+```
+
+Then either let the server download the weights automatically on first launch, or place them locally:
+
+```bash
+mkdir -p checkpoints/sam3
+# download the sam3.pt weights into checkpoints/sam3/
+```
+
+### 3. Install the annotation server dependencies
+
+```bash
 pip install -r app/server/requirements.txt
+```
 
-# 2. Prepare the SAM 3 checkpoint (under checkpoints/, e.g. checkpoints/sam3/)
+This installs FastAPI, uvicorn (with WebSocket support), python-multipart (video upload), aiofiles and websockets.
 
-# 3. Start the server (GPU auto-selected; use SAM3_GPU=<index> to pin one)
+### 4. Start the server
+
+```bash
+# SAM3_CHECKPOINT_PATH is optional — when unset, weights are fetched
+# from Hugging Face automatically (authentication required)
+SAM3_CHECKPOINT_PATH=checkpoints/sam3/sam3.pt \
 uvicorn app.server.app:app --host 0.0.0.0 --port 8000
 ```
 
 Open `http://<server>:8000` in a browser and follow *upload video → draw box/point prompts → preview → confirm → propagate → export*.
+
+On startup the service pins itself to the GPU with the most free memory; set `SAM3_GPU=<index>` to pin a specific device (an externally exported `CUDA_VISIBLE_DEVICES` always takes precedence).
+
+### Configuration reference
+
+All server configuration is done via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SAM3_CHECKPOINT_PATH` | *(unset)* | Local checkpoint file; when unset, weights are fetched from Hugging Face |
+| `SAM3_GPU` | `auto` | GPU index to pin, or `auto` to pick the idlest card at import time |
+| `SAM3_MAX_SESSIONS` | `4` | Maximum number of concurrent annotation sessions |
+| `SAM3_MAX_INFERENCE` | `1` | Maximum number of concurrent inference tasks |
+| `SAM3_LOG_DIR` | `logs` | Directory for server-side log persistence |
+
+For production, run under a process supervisor or simply:
+
+```bash
+nohup uvicorn app.server.app:app --host 0.0.0.0 --port 8000 > sam3_server.log 2>&1 &
+```
 
 ## Annotation Workflow
 
