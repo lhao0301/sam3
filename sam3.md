@@ -29,7 +29,7 @@
 | 训练数据 | SA-1B（11M 图 / 1B mask） | SA-V（5 万视频 / 60 万 masklet） | SA-Co（概念标注 gold/silver 集） | 同 SAM 3（multiplex 微调） |
 | 多掩码输出 | 3 候选 + IoU 选优 | 同左 + dynamic multimask | 同左（tracker 侧）；检测侧 200 query 一次出全图 | 同左 |
 | 推理效率 | 慢（重编码器） | 快（Hiera + 流式） | 848M 参数；多卡 SPMD 支持 | + torch.compile 约 2×；多对象场景大幅提速 |
-| 本仓库对应 | `sam3/sam/` 三大件（被复用）；能力矩阵 B | tracker 的记忆机制；能力矩阵 F | 仓库主体；能力矩阵 A-D、G | `sam3_multiplex_*`；能力矩阵 E；`RELEASE_SAM3p1.md` |
+| 本仓库对应 | `sam3/sam/` 三大件（被复用）；能力矩阵 H（经 B 复现） | tracker 的记忆机制；能力矩阵 J（经 F 复现） | 仓库主体；能力矩阵 A-D、G | `sam3_multiplex_*`；能力矩阵 E；`RELEASE_SAM3p1.md` |
 
 ### 1.3 关键增量解读（每个模型只讲“新加了什么”）
 
@@ -52,6 +52,25 @@ SAM3 = 共享ViT + 双路Neck + 检测器(新) + tracker(SAM2血统) + 缝合平
                                     ▼ decoder 换 multiplex 桶
 SAM3.1 = SAM3 + MultiplexMaskDecoder + torch.compile
 ```
+
+### 1.5 能力矩阵
+
+表尾 **H / I / J** 为 SAM 与 SAM 2 原版能力（含在本仓库的复现方式），A-G 为本仓库 SAM3 的可用模式：
+
+| # | 模式 | 输入 | 提示类型 | 核心能力 | 构建入口 |
+|---|------|------|----------|----------|----------|
+| A | 图像开放词汇分割 | 单图 | 文本、框(正/负) | 检测并分割某概念的所有实例 | `build_sam3_image_model()` + `Sam3Processor` |
+| B | 图像交互式分割（SAM1-task） | 单图/批量图 | 点(正/负)、框、掩码 | 单目标交互式抠图，SAM1 风格 | `build_sam3_image_model(enable_inst_interactivity=True)` |
+| C | 图像批量推理 | 图集 | 文本 | 批量开放词汇分割 | 同 A，`set_image_batch` |
+| D | SAM3 原生视频跟踪 | 视频/帧目录 | 文本、点、框 | 文本检测所有实例 + 全程跟踪 + 点精修；多 GPU | `build_sam3_predictor(version="sam3")` |
+| E | SAM 3.1 Multiplex 视频 | 视频/帧目录 | 文本、点 | 同 D，多对象共享记忆，大幅提速 | `build_sam3_predictor(version="sam3.1")` |
+| F | SAM2-task 视频跟踪 | 视频/帧目录 | 点、框 | SAM2 风格交互式 VOS（无文本） | `build_sam3_video_model().tracker` |
+| G | Agent 模式 | 单图 | 自然语言指令 | MLLM 多轮推理 + SAM3 工具调用，处理复杂指代表达 | `sam3/agent/` |
+| H | SAM 原版·单图交互分割（PS） | 单图 | 点(正/负)、框、掩码 | 单目标 3 候选 mask + IoU 选优 + 迭代精修（2023 原版范式）；本仓库由模式 B 完整复现 | `sam3/sam/` 三大件（经模式 B 的 SAM 头使用） |
+| I | SAM 原版·全自动分割（AMG） | 单图 | 网格点（自动采样） | 无提示全图自动产出实例 mask；官方 sam 库能力，本仓库未包含 | —（官方 `sam` 库） |
+| J | SAM 2 原版·可提示视频分割（PVS） | 单图/视频 | 点、框 | 提示帧初始化 → 流式记忆逐帧传播 + 双向传播 + 任意帧精修；无文本；本仓库由模式 F 完整复现（同一套权重与记忆机制） | tracker（`Sam3TrackerPredictor`，API 对齐 SAM2 视频预测器） |
+
+前代对应关系：**H ↔ B、J ↔ F**。本仓库不加载独立的前代 checkpoint——SAM 能力 = tracker 内的 SAM 头（PromptEncoder + MaskDecoder，即 `sam3/sam/` 三大件），模式 B 直接暴露原版 `predict` 风格接口；SAM 2 能力 = tracker 本体（记忆机制原样继承），模式 F 暴露原版 `init_state / add_new_points / propagate_in_video` 风格接口。权重全部来自同一个 `sam3.pt`。
 
 ---
 
@@ -96,27 +115,13 @@ SAM 3.1（2026-03 发布）在 tracker 侧引入 **Object Multiplex**：把多�
 
 ---
 
-## 3. 能力矩阵
+## 3. SAM3 原生模式完整模型结构
 
-| # | 模式 | 输入 | 提示类型 | 核心能力 | 构建入口 |
-|---|------|------|----------|----------|----------|
-| A | 图像开放词汇分割 | 单图 | 文本、框(正/负) | 检测并分割某概念的所有实例 | `build_sam3_image_model()` + `Sam3Processor` |
-| B | 图像交互式分割（SAM1-task） | 单图/批量图 | 点(正/负)、框、掩码 | 单目标交互式抠图，SAM1 风格 | `build_sam3_image_model(enable_inst_interactivity=True)` |
-| C | 图像批量推理 | 图集 | 文本 | 批量开放词汇分割 | 同 A，`set_image_batch` |
-| D | SAM3 原生视频跟踪 | 视频/帧目录 | 文本、点、框 | 文本检测所有实例 + 全程跟踪 + 点精修；多 GPU | `build_sam3_predictor(version="sam3")` |
-| E | SAM 3.1 Multiplex 视频 | 视频/帧目录 | 文本、点 | 同 D，多对象共享记忆，大幅提速 | `build_sam3_predictor(version="sam3.1")` |
-| F | SAM2-task 视频跟踪 | 视频/帧目录 | 点、框 | SAM2 风格交互式 VOS（无文本） | `build_sam3_video_model().tracker` |
-| G | Agent 模式 | 单图 | 自然语言指令 | MLLM 多轮推理 + SAM3 工具调用，处理复杂指代表达 | `sam3/agent/` |
-
----
-
-## 4. SAM3 原生模式完整模型结构
-
-### 4.0 架构位置（承接章节 1）
+### 3.0 架构位置（承接章节 1）
 
 SAM3 原生模式即能力矩阵 D：完整启用检测分支 + 跟踪分支 + 缝合平面，是四代演进中"解耦架构"的完整形态（见 1.3 第 3 条增量）。本章自底向上拆解其全部组件。
 
-### 4.1 共享骨干：ViT trunk 与双路 Neck
+### 3.1 共享骨干：ViT trunk 与双路 Neck
 
 ```
 输入图像 1008×1008×3
@@ -158,7 +163,7 @@ SAM3 原生模式即能力矩阵 D：完整启用检测分支 + 跟踪分支 + �
 
 要点：ViTDet 式"**窗口为主、全局点缀**"——32 块里 28 块只做窗口内注意力，计算量近似线性于图像面积，只靠 4 个全局块交换全图信息。trunk 只有一个输出，两个 Neck 各自卷积出多尺度——**检测/跟踪的特征解耦从这里开始**（各自 neck 权重塑造各自特征风格）。
 
-### 4.2 检测分支（Detector = `Sam3Image.forward_grounding`）
+### 3.2 检测分支（Detector = `Sam3Image.forward_grounding`）
 
 ```
       text_memory (≤77 token × 256)        几何 prompt 嵌入 (n_prompt × 256)
@@ -220,7 +225,7 @@ SAM3 原生模式即能力矩阵 D：完整启用检测分支 + 跟踪分支 + �
 
 **text_memory 的 3 个消费者**（全部在检测分支）：① EncoderFusion 每层 cross-attn 的 KV；② Decoder 每层 `ca_text` 的 KV；③ DotProductScoring 的点积打分。跟踪分支**完全不消费文本**。
 
-### 4.3 跟踪分支（Tracker）与记忆库
+### 3.3 跟踪分支（Tracker）与记忆库
 
 ```
 ════════════════ 记忆库（每个 obj_id 一套,跨帧持久）═════════════════════
@@ -284,7 +289,7 @@ SAM3 原生模式即能力矩阵 D：完整启用检测分支 + 跟踪分支 + �
 - **写（SAM3 原生）**：刻意延迟——S2 预测的 mask 是"未经确认的猜测"，要等 S3 关联规划裁决后才编码入记忆，防止一次传播误差污染记忆库造成误差滚雪球。
 - **SAM2 路特征**：SAM2 Neck 3 尺度 → conv_s0/s1 对齐 → `feature_cache[t]`，双消费者：MemoryAttention 的 src（Q 侧）+ MaskDecoder 高分辨率特征。
 
-### 4.4 缝合平面：单帧五步流水线（`_det_track_one_frame`）
+### 3.4 缝合平面：单帧五步流水线（`_det_track_one_frame`）
 
 | 步 | 方法 | 干什么 |
 |---|---|---|
@@ -294,7 +299,7 @@ SAM3 原生模式即能力矩阵 D：完整启用检测分支 + 跟踪分支 + �
 | S4 | `run_tracker_update_execution_phase` | 按计划增删 tracklet + 全局记忆编码（新轨迹初始化帧写 cond、高置信度时 recondition 刷新 mask、非重叠约束） |
 | S5 | `build_outputs` | 合并检测+跟踪 → `{obj_id: mask, score}`，后处理（非重叠/未确认隐藏/坐标还原）→ yield |
 
-### 4.5 完整结构图（一图流）
+### 3.5 完整结构图（一图流）
 
 ```
 ════════════════════════════ ① 输入层（一次性/每帧）════════════════════════════
@@ -437,9 +442,9 @@ SAM3 原生模式即能力矩阵 D：完整启用检测分支 + 跟踪分支 + �
 
 ---
 
-## 5. SAM2-task 模式完整模型结构
+## 4. SAM2-task 模式完整模型结构
 
-### 5.1 模型组装方式（[sam2_service.py](app/server/sam2_service.py#L84-L110)）
+### 4.1 模型组装方式（[sam2_service.py](app/server/sam2_service.py#L84-L110)）
 
 ```python
 video_model = build_sam3_video_model(apply_temporal_disambiguation=False)
@@ -453,7 +458,7 @@ del video_model                            # 丢弃 detector（含检测头）
 - `SAM3VLBackbone` 双 Neck 都会前向计算，但只取 `sam2_backbone_out`（[sam3_tracker_base.py `forward_image`](sam3/model/sam3_tracker_base.py#L442-L463)：fpn[0/1] 预过 conv_s0/s1，scalp=1 丢弃最低分辨率）——**检测路的卷积是纯开销**；
 - text encoder 随模型加载但从不被调用。
 
-### 5.2 完整结构图
+### 4.2 完整结构图
 
 ```
 ══════════════════════ ① 输入层 ══════════════════════
@@ -542,7 +547,7 @@ del video_model                            # 丢弃 detector（含检测头）
                                                     其余→non_cond
 ```
 
-### 5.3 单目标跟踪生命周期（两模式共用的 tracker 机制）
+### 4.3 单目标跟踪生命周期（两模式共用的 tracker 机制）
 
 ```
 诞生 ──► 预热 ──► 逐帧传播(读→融合→解码→写→输出 循环) ──► 精修(回到预热) ──► 消亡
@@ -556,7 +561,7 @@ del video_model                            # 丢弃 detector（含检测头）
 4. **精修**：任意帧加点/框——又是"只算不存"（带旧 mask logits + 新点在记忆上下文中修正）→ 下次 preflight 升级为**新条件帧** → 重传播时全视频非条件帧重算覆盖，锚点不动。
 5. **消亡**：`remove_object` 切除槽位（其他目标原样保留）。
 
-### 5.4 多目标隔离与相互影响
+### 4.4 多目标隔离与相互影响
 
 **完全隔离**：
 - prompt 分账本存储（`point_inputs_per_obj[obj_idx]`），A 的框/点永不进入 B 的解码器；传播帧所有目标 `point_inputs=None`；
@@ -574,7 +579,7 @@ del video_model                            # 丢弃 detector（含检测头）
 
 SAM3 原生模式下影响更剧烈：S3 全局匈牙利匹配（一对一竞争）、每帧全局非重叠记忆编码、hotstart 去重、`max_num_objects` 挤位、keep-alive 生存竞争、输出级非重叠+未确认隐藏。
 
-### 5.5 与 SAM3 原生模式对比
+### 4.5 与 SAM3 原生模式对比
 
 ```
                 SAM3 原生模式                    SAM2-task 模式
