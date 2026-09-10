@@ -89,18 +89,18 @@ Mask overlay preview:
 Frontend/server split: the static frontend is served by FastAPI and can also be deployed independently (CORS enabled).
 
 ```
-┌────────────────────────────┐         ┌─────────────────────────────────┐
-│  Frontend  app/frontend/   │  REST   │  Backend  app/server/           │
-│  ├─ ws-client.js    WS client│ ─────▶ │  ├─ app.py         FastAPI entry│
-│  ├─ video-player.js player │  HTTP   │  ├─ sam2_service.py inference   │
-│  ├─ prompt-canvas.js prompts│ ◀───── │  ├─ session_manager.py sessions │
-│  ├─ mask-overlay.js masks  │ WS stream│  ├─ ws_manager.py  WS manager  │
-│  ├─ log-terminal.js terminal│        │  ├─ gpu_utils.py   GPU selection│
-│  └─ app.js          state  │         │  └─ frame/mask_utils.py helpers │
-└────────────────────────────┘         └──────────────┬──────────────────┘
-                                                      │
-                                             SAM 3 checkpoint
-                                      (Sam3TrackerPredictor · SAM2-task)
+┌─────────────────────────────────────────┐          ┌───────────────────────────────────────────┐
+│ Frontend  app/frontend/                 │  REST    │ Backend  app/server/                      │
+│ ├─ ws-client.js     WS client           │ ──────▶  │ ├─ app.py              FastAPI entry      │
+│ ├─ video-player.js  player              │ ◀──────  │ ├─ sam2_service.py     inference service  │
+│ ├─ prompt-canvas.js prompts             │ WS stream │ ├─ session_manager.py  session mgmt       │
+│ ├─ mask-overlay.js  mask layer          │          │ ├─ ws_manager.py       WS manager         │
+│ ├─ log-terminal.js  log terminal        │          │ ├─ gpu_utils.py        GPU selection      │
+│ └─ app.js           state orchestration │          │ └─ frame/mask_utils.py frame/mask helpers │
+└─────────────────────────────────────────┘          └───────────────────────────────────────────┘
+                                                                    │
+                                          SAM 3 checkpoint
+                                          (Sam3TrackerPredictor · SAM2-task mode)
 ```
 
 ## Quick Start

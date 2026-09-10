@@ -87,18 +87,18 @@
 前后端分离：静态前端由 FastAPI 直接托管，也可独立部署（已启用 CORS）。
 
 ```
-┌────────────────────────────┐         ┌─────────────────────────────────┐
-│  前端 app/frontend/        │  REST   │  后端 app/server/               │
-│  ├─ ws-client.js   WS 客户端│ ──────▶ │  ├─ app.py        FastAPI 入口  │
-│  ├─ video-player.js 播放器 │  HTTP   │  ├─ sam2_service.py 推理服务    │
-│  ├─ prompt-canvas.js 提示  │ ◀────── │  ├─ session_manager.py 会话管理 │
-│  ├─ mask-overlay.js 掩码层 │  WS流式  │  ├─ ws_manager.py  WS 管理     │
-│  ├─ log-terminal.js 终端   │         │  ├─ gpu_utils.py   GPU 选择     │
-│  └─ app.js         状态编排 │         │  └─ frame/mask_utils.py 工具   │
-└────────────────────────────┘         └──────────────┬──────────────────┘
-                                                      │
-                                              SAM 3 checkpoint
-                                       （Sam3TrackerPredictor · SAM2-task）
+┌───────────────────────────────┐          ┌─────────────────────────────────────┐
+│ 前端 app/frontend/            │  REST    │ 后端 app/server/                    │
+│ ├─ ws-client.js     WS 客户端 │ ──────▶  │ ├─ app.py              FastAPI 入口 │
+│ ├─ video-player.js  播放器    │ ◀──────  │ ├─ sam2_service.py     推理服务     │
+│ ├─ prompt-canvas.js 提示绘制  │ WS 流式 │ ├─ session_manager.py  会话管理     │
+│ ├─ mask-overlay.js  掩码叠加  │          │ ├─ ws_manager.py       WS 管理      │
+│ ├─ log-terminal.js  日志终端  │          │ ├─ gpu_utils.py        GPU 选择     │
+│ └─ app.js           状态编排  │          │ └─ frame/mask_utils.py 帧与掩码工具 │
+└───────────────────────────────┘          └─────────────────────────────────────┘
+                                                       │
+                                          SAM 3 checkpoint
+                                          （Sam3TrackerPredictor · SAM2-task 模式）
 ```
 
 ## 快速开始
