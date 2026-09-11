@@ -255,6 +255,10 @@ SAM 3 paper and resources:
 
 [[`Paper`](https://ai.meta.com/research/publications/sam-3-segment-anything-with-concepts/)] [[`Project`](https://ai.meta.com/sam3)] [[`Demo`](https://segment-anything.com/)]
 
+## AI-Assisted Development
+
+The `app/` video annotation tool (static frontend + FastAPI backend) in this repository was developed with the assistance of an AI coding agent: the implementation was largely AI-generated, then reviewed, tested, and debugged by human engineers before release. The upstream SAM 3 model code (`sam3/`) is from Meta and is included unmodified.
+
 ## Acknowledgements
 
 This project builds on the **SAM 3** model, code, and checkpoints released by Meta AI Research — thanks to the SAM 3 team ([facebookresearch/sam3](https://github.com/facebookresearch/sam3)) for open-sourcing the model and the full training/inference codebase. The tracking engine behind the annotation tool is the SAM2-task mode of SAM 3, which inherits the memory-based video segmentation design of SAM 2. The optional inference speedups rely on [FlashAttention-3](https://github.com/Dao-AILab/flash-attention) and [cc_torch](https://github.com/ronghanghu/cc_torch).

@@ -252,6 +252,10 @@ SAM 3 论文与更多资源：
 
 [[`Paper`](https://ai.meta.com/research/publications/sam-3-segment-anything-with-concepts/)] [[`Project`](https://ai.meta.com/sam3)] [[`Demo`](https://segment-anything.com/)]
 
+## AI 辅助开发说明
+
+本仓库中的 `app/` 视频标注工具（静态前端 + FastAPI 后端）在 AI 编程助手辅助下开发：代码主体由 AI 生成，经人工评审、测试与调试后发布。上游 SAM 3 模型代码（`sam3/`）来自 Meta，未做修改。
+
 ## 致谢
 
 本项目构建于 Meta AI Research 开源的 **SAM 3** 模型、代码与权重之上——感谢 SAM 3 团队（[facebookresearch/sam3](https://github.com/facebookresearch/sam3)）开放模型与完整训练/推理代码。标注工具使用的跟踪引擎是 SAM 3 的 SAM2-task 模式，其流式记忆视频分割设计承自 SAM 2。可选的推理加速依赖 [FlashAttention-3](https://github.com/Dao-AILab/flash-attention) 与 [cc_torch](https://github.com/ronghanghu/cc_torch)。
