@@ -2,9 +2,9 @@
 
 [English](README.md) | 简体中文
 
-基于 [Meta SAM 3](https://github.com/facebookresearch/sam3) 视频跟踪引擎（SAM2-task 模式）构建的浏览器端**单目标视频标注工具**。
+基于 [Meta SAM 3](https://github.com/facebookresearch/sam3) 视频跟踪引擎（SAM2-task 模式）构建的浏览器端**多目标视频标注工具**。
 
-通过「框初始化 → 跨帧点精修 → 掩码传播」的交互流程，为视频中单个目标快速生成像素级分割标注；前端负责交互与可视化，FastAPI 后端负责推理与会话管理，掩码与进度经 WebSocket 实时流式回传。
+通过「框初始化 → 跨帧点精修 → 掩码传播」的交互流程，为视频中一个或多个目标快速生成像素级分割标注；前端负责交互与可视化，FastAPI 后端负责推理与会话管理，掩码与进度经 WebSocket 实时流式回传。
 
 > 本仓库同时包含完整的 SAM 3 模型代码（`sam3/`），上游官方文档见 [facebookresearch/sam3](https://github.com/facebookresearch/sam3)；模型结构深度解析见 [sam3.md](sam3.md)（中文）。
 

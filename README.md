@@ -2,9 +2,9 @@
 
 English | [简体中文](README_CN.md)
 
-A browser-based **single-object video annotation tool** built on the video tracking engine of [Meta SAM 3](https://github.com/facebookresearch/sam3) (SAM2-task mode).
+A browser-based **multi-object video annotation tool** built on the video tracking engine of [Meta SAM 3](https://github.com/facebookresearch/sam3) (SAM2-task mode).
 
-Annotate pixel-level segmentation for a single target in a video through an interactive workflow — **box initialization → cross-frame point refinement → mask propagation**. The frontend handles interaction and visualization; a FastAPI backend runs inference and session management, streaming masks and progress back over WebSocket in real time.
+Annotate pixel-level segmentation for one or more targets in a video through an interactive workflow — **box initialization → cross-frame point refinement → mask propagation**. The frontend handles interaction and visualization; a FastAPI backend runs inference and session management, streaming masks and progress back over WebSocket in real time.
 
 > This repository also ships the complete SAM 3 model code (`sam3/`). For the upstream official documentation see [facebookresearch/sam3](https://github.com/facebookresearch/sam3); for a deep dive into the model architecture see [sam3.md](sam3.md) (Chinese).
 
