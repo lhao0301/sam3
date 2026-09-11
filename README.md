@@ -2,7 +2,7 @@
 
 English | [简体中文](README_CN.md)
 
-A browser-based **multi-object video annotation tool** built on the video tracking engine of [Meta SAM 3](https://github.com/facebookresearch/sam3) (SAM2-task mode).
+A browser-based **multi-object video annotation tool** built on the video tracking engine of [Meta SAM 3](https://github.com/facebookresearch/sam3) ([SAM2-task mode](sam3.md#15-能力矩阵)).
 
 Annotate pixel-level segmentation for one or more targets in a video through an interactive workflow — **box initialization → cross-frame point refinement → mask propagation**. The frontend handles interaction and visualization; a FastAPI backend runs inference and session management, streaming masks and progress back over WebSocket in real time.
 
@@ -249,7 +249,7 @@ test/                       Annotation workflow and frontend tests
 
 ## Underlying Model
 
-Inference runs on the **Sam3TrackerPredictor** inside the SAM 3 checkpoint (SAM2-task mode): streaming memory-based tracking, incremental prompts without reset, user-specified object ids, and combinable point/box prompts. SAM 3 introduces concept prompts and open-vocabulary detection over SAM 2; for the evolution and architecture of all four model generations see [sam3.md](sam3.md) (Chinese).
+Inference runs on the **Sam3TrackerPredictor** inside the SAM 3 checkpoint ([SAM2-task mode](sam3.md#15-能力矩阵)): streaming memory-based tracking, incremental prompts without reset, user-specified object ids, and combinable point/box prompts. SAM 3 introduces concept prompts and open-vocabulary detection over SAM 2; for the evolution and architecture of all four model generations see [sam3.md](sam3.md) (Chinese).
 
 SAM 3 paper and resources:
 
@@ -261,7 +261,7 @@ The `app/` video annotation tool (static frontend + FastAPI backend) in this rep
 
 ## Acknowledgements
 
-This project builds on the **SAM 3** model, code, and checkpoints released by Meta AI Research — thanks to the SAM 3 team ([facebookresearch/sam3](https://github.com/facebookresearch/sam3)) for open-sourcing the model and the full training/inference codebase. The tracking engine behind the annotation tool is the SAM2-task mode of SAM 3, which inherits the memory-based video segmentation design of SAM 2. The optional inference speedups rely on [FlashAttention-3](https://github.com/Dao-AILab/flash-attention) and [cc_torch](https://github.com/ronghanghu/cc_torch).
+This project builds on the **SAM 3** model, code, and checkpoints released by Meta AI Research — thanks to the SAM 3 team ([facebookresearch/sam3](https://github.com/facebookresearch/sam3)) for open-sourcing the model and the full training/inference codebase. The tracking engine behind the annotation tool is the [SAM2-task mode](sam3.md#15-能力矩阵) of SAM 3, which inherits the memory-based video segmentation design of SAM 2. The optional inference speedups rely on [FlashAttention-3](https://github.com/Dao-AILab/flash-attention) and [cc_torch](https://github.com/ronghanghu/cc_torch).
 
 ## Citing SAM 3
 

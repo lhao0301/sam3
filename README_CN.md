@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-基于 [Meta SAM 3](https://github.com/facebookresearch/sam3) 视频跟踪引擎（SAM2-task 模式）构建的浏览器端**多目标视频标注工具**。
+基于 [Meta SAM 3](https://github.com/facebookresearch/sam3) 视频跟踪引擎（[SAM2-task 模式](sam3.md#15-能力矩阵)）构建的浏览器端**多目标视频标注工具**。
 
 通过「框初始化 → 跨帧点精修 → 掩码传播」的交互流程，为视频中一个或多个目标快速生成像素级分割标注；前端负责交互与可视化，FastAPI 后端负责推理与会话管理，掩码与进度经 WebSocket 实时流式回传。
 
@@ -246,7 +246,7 @@ test/                       标注工作流与前端测试
 
 ## 底层模型
 
-推理运行于 SAM 3 checkpoint 内的 **Sam3TrackerPredictor**（SAM2-task 模式）：流式记忆跟踪，提示增量生效不重置，每个对象携带用户指定 id，点与框可组合。SAM 3 相较 SAM 2 引入概念提示与开放词汇检测；四代模型演进与结构详解见 [sam3.md](sam3.md)。
+推理运行于 SAM 3 checkpoint 内的 **Sam3TrackerPredictor**（[SAM2-task 模式](sam3.md#15-能力矩阵)）：流式记忆跟踪，提示增量生效不重置，每个对象携带用户指定 id，点与框可组合。SAM 3 相较 SAM 2 引入概念提示与开放词汇检测；四代模型演进与结构详解见 [sam3.md](sam3.md)。
 
 SAM 3 论文与更多资源：
 
@@ -258,7 +258,7 @@ SAM 3 论文与更多资源：
 
 ## 致谢
 
-本项目构建于 Meta AI Research 开源的 **SAM 3** 模型、代码与权重之上——感谢 SAM 3 团队（[facebookresearch/sam3](https://github.com/facebookresearch/sam3)）开放模型与完整训练/推理代码。标注工具使用的跟踪引擎是 SAM 3 的 SAM2-task 模式，其流式记忆视频分割设计承自 SAM 2。可选的推理加速依赖 [FlashAttention-3](https://github.com/Dao-AILab/flash-attention) 与 [cc_torch](https://github.com/ronghanghu/cc_torch)。
+本项目构建于 Meta AI Research 开源的 **SAM 3** 模型、代码与权重之上——感谢 SAM 3 团队（[facebookresearch/sam3](https://github.com/facebookresearch/sam3)）开放模型与完整训练/推理代码。标注工具使用的跟踪引擎是 SAM 3 的 [SAM2-task 模式](sam3.md#15-能力矩阵)，其流式记忆视频分割设计承自 SAM 2。可选的推理加速依赖 [FlashAttention-3](https://github.com/Dao-AILab/flash-attention) 与 [cc_torch](https://github.com/ronghanghu/cc_torch)。
 
 ## SAM 3 论文引用
 
