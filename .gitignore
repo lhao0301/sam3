@@ -161,8 +161,12 @@ strace.err
 strace.log
 nohup.out
 
+# Server-side annotation export artifacts (masks / annotated.mp4 / json)
+output/
+
 # Local hand-annotation test video (never publish)
 无悔追踪-4_x1.534_t2v_ref.mp4
+test.mp4
 
 # Internal docs and one-off debug scripts
 app/REFACTOR_PROMPT.md

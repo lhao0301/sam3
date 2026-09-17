@@ -51,6 +51,9 @@ class AnnotationApp {
         this._propExpectedTotal = 0;
         this._propSegmentCounts = { forward: 0, backward: 0, backfill: 0 };
 
+        // Export state (background server-side export + status polling)
+        this._exportRunning = false;
+
         // UI elements
         this.els = {};
 
@@ -140,6 +143,7 @@ class AnnotationApp {
             btnPropagate: document.getElementById("btn-propagate"),
             btnCancel: document.getElementById("btn-cancel"),
             btnResetTracking: document.getElementById("btn-reset-tracking"),
+            btnExport: document.getElementById("btn-export"),
             progressFill: document.getElementById("progress-fill"),
             progressText: document.getElementById("progress-text"),
             // Status bar
@@ -278,6 +282,7 @@ class AnnotationApp {
         this.els.btnPropagate.addEventListener("click", () => this._handlePropagate());
         this.els.btnCancel.addEventListener("click", () => this._handleCancel());
         this.els.btnResetTracking.addEventListener("click", () => this._handleResetTracking());
+        this.els.btnExport.addEventListener("click", () => this._handleExport());
 
         // Window resize: re-fit viewport
         let resizeTimer = null;
@@ -359,6 +364,7 @@ class AnnotationApp {
         if (!this.sessionId) return;
         const oldSid = this.sessionId;
         this.sessionId = null;
+        this._updateExportButton();
         this.logTerminal.log("INFO", "新上传替换旧会话，正在关闭...");
         try {
             await fetch(`/api/session/${oldSid}`, { method: "DELETE" });
@@ -490,7 +496,10 @@ class AnnotationApp {
             const resp = await fetch("/api/session/start", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ video_path: this.videoPath }),
+                body: JSON.stringify({
+                    video_path: this.videoPath,
+                    video_filename: this.videoFilename,
+                }),
             });
 
             if (!resp.ok) {
@@ -538,6 +547,7 @@ class AnnotationApp {
             this.els.btnResetTracking.disabled = false;
             this.els.trackletIdInput.value = this._suggestTrackletId();
             this._updatePromptButtons();
+            this._updateExportButton();
 
             this.els.uploadStatus.textContent = "";
             this._setUploadState("btn-success");
@@ -674,11 +684,13 @@ class AnnotationApp {
         }
 
         // Combined point+box submission; obj_id decides whether this is a
-        // new object (new id) or a refinement of an existing one
+        // new object (new id) or a refinement of an existing one. The
+        // class name rides along for the export (confirm may override it)
         const payload = {
             session_id: this.sessionId,
             frame_idx: frameIdx,
             obj_id: trackletId,
+            className: this.els.classNameInput.value.trim() || "default",
         };
         if (pending.points) {
             payload.points = pending.points;
@@ -752,12 +764,17 @@ class AnnotationApp {
         }
 
         // Tell the backend to move the pending prompt into the confirmed
-        // set (it will be replayed on every subsequent submission)
+        // set (it will be replayed on every subsequent submission); the
+        // class name sent here is the authoritative one for the export
         try {
             const resp = await fetch("/api/prompt/confirm", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ session_id: this.sessionId }),
+                body: JSON.stringify({
+                    session_id: this.sessionId,
+                    obj_ids: this.pendingObjIds,
+                    className,
+                }),
             });
             if (!resp.ok) {
                 const err = await resp.json();
@@ -798,6 +815,7 @@ class AnnotationApp {
 
         this._renderTrackletList();
         this._updatePromptButtons();
+        this._updateExportButton();
     }
 
     async _handleUndoPrompt() {
@@ -959,6 +977,7 @@ class AnnotationApp {
         this._setPromptStatus(`已删除目标 #${id}`, "#ff9800");
         this.logTerminal.log("INFO", `已删除 tracklet #${id} (${t.className})`);
         this._updatePromptButtons();
+        this._updateExportButton();
     }
 
     // ─── Filmstrip ──────────────────────────────────────────────────
@@ -1127,6 +1146,7 @@ class AnnotationApp {
         this.els.btnPrev.disabled = true;
         this.els.btnNext.disabled = true;
         this.els.btnPlay.disabled = true;
+        this._updateExportButton();
 
         // Reset mask overlay state, then immediately re-fetch the current
         // frame from the tracker (prompt frames hold fresh temp outputs):
@@ -1295,6 +1315,75 @@ class AnnotationApp {
         const currentFrame = this.player.getCurrentFrame();
         if (this.sessionId) {
             this.maskOverlay.fetchAndDisplayMask(currentFrame);
+        }
+        this._updateExportButton();
+    }
+
+    // ─── Export (server-side three-artifact output) ──────────────────
+
+    _updateExportButton() {
+        if (!this.els.btnExport) return;
+        this.els.btnExport.disabled =
+            !this.sessionId || this.tracklets.size === 0 ||
+            this.isPropagating || this._exportRunning;
+    }
+
+    async _handleExport() {
+        if (!this.sessionId || this._exportRunning) return;
+
+        this._exportRunning = true;
+        this._updateExportButton();
+        this.logTerminal.progressStart("export", "导出 mask 序列 / 视频 / JSON...");
+
+        try {
+            const resp = await fetch(`/api/export/${this.sessionId}`, {
+                method: "POST",
+            });
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.detail || "export failed");
+            }
+            await this._pollExportStatus();
+        } catch (e) {
+            this.logTerminal.progressEnd("export", "ERR", `导出失败: ${e.message}`);
+        } finally {
+            this._exportRunning = false;
+            this._updateExportButton();
+        }
+    }
+
+    async _pollExportStatus() {
+        const sid = this.sessionId;
+        let lastPct = -1;
+        while (true) {
+            const resp = await fetch(`/api/export/${sid}/status`);
+            if (!resp.ok) {
+                throw new Error("导出状态查询失败（会话可能已过期）");
+            }
+            const st = await resp.json();
+
+            if (st.running) {
+                const pct = Math.round((st.progress || 0) * 100);
+                if (pct !== lastPct) {
+                    lastPct = pct;
+                    this.logTerminal.progressUpdate(
+                        "export", pct,
+                        `导出中 ${st.frames_done}/${st.total_frames} 帧`
+                    );
+                }
+                await new Promise((r) => setTimeout(r, 1000));
+                continue;
+            }
+
+            if (st.last_error) {
+                throw new Error(st.last_error);
+            }
+            this.logTerminal.progressEnd(
+                "export", "OK",
+                `导出完成: ${st.output_dir}` +
+                `（mask ${st.frames_done} 张 + annotated.mp4 + annotation.json）`
+            );
+            return;
         }
     }
 

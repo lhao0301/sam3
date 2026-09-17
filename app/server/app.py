@@ -87,6 +87,13 @@ CHECKPOINT_PATH = os.environ.get("SAM3_CHECKPOINT_PATH", "")
 UPLOAD_DIR = Path("/tmp/sam3_uploads")
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 LOG_DIR = Path(os.environ.get("SAM3_LOG_DIR", "logs"))
+# Server-side export output root: manual export button writes the mask
+# sequence / annotated video / annotation JSON here (repo-root output/
+# by default so it survives service restarts, unlike /tmp exports)
+OUTPUT_DIR = Path(os.environ.get(
+    "SAM3_OUTPUT_DIR",
+    str(Path(__file__).resolve().parent.parent.parent / "output"),
+))
 
 # Global instances
 session_manager: SessionManager = None
@@ -104,7 +111,12 @@ def _purge_stale_tmp_dirs():
 
 
 async def _close_session_full(session_id: str):
-    """Close the tracker session, drop metadata and delete the frames dir."""
+    """Close the tracker session, drop metadata and delete the frames dir.
+
+    A running background export finishes first (bounded wait) so its
+    artifacts are not truncated by the state release.
+    """
+    await sam2_service.wait_export(session_id)
     await sam2_service.close_session(session_id)
     session_manager.remove_session(session_id)
 
@@ -118,6 +130,8 @@ async def lifespan(app: FastAPI):
     _purge_stale_tmp_dirs()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Export output directory: {OUTPUT_DIR}")
     logger.info("Initializing SAM3 annotation service (SAM2-task mode)...")
 
     # The GPU was already picked and pinned via CUDA_VISIBLE_DEVICES at
@@ -238,6 +252,11 @@ async def start_session(request: dict):
     video_path = request.get("video_path")
     if not video_path or not os.path.exists(video_path):
         raise HTTPException(status_code=400, detail="video_path is required and must exist")
+    # Original filename (for display and export dir naming); falls back
+    # to the basename of the server-side path
+    video_filename = (
+        request.get("video_filename") or Path(video_path).name
+    )
 
     # Step 1: Create session metadata (to get a session_id for frames dir)
     import uuid
@@ -263,6 +282,7 @@ async def start_session(request: dict):
             orig_height=orig_height,
             orig_width=orig_width,
             video_fps=video_fps,
+            video_filename=video_filename,
         )
     except RuntimeError as e:
         cleanup_session_frames(temp_session_id)
@@ -326,6 +346,7 @@ async def add_prompt(request: dict):
     points = request.get("points")
     point_labels = request.get("point_labels")
     box = request.get("box")
+    class_name = request.get("className")  # optional, recorded for export
 
     if points is not None:
         if point_labels is None or len(points) != len(point_labels):
@@ -351,6 +372,7 @@ async def add_prompt(request: dict):
             points=points,
             point_labels=point_labels if points else None,
             box=box,
+            class_name=class_name,
         )
     except PermissionError as e:
         # propagation started; brand-new objects need reset_tracking first
@@ -376,12 +398,21 @@ async def confirm_prompt(request: dict):
     """Confirm the previewed prompt.
 
     In SAM2-task mode submissions are already applied to the tracker
-    state, so this is pure bookkeeping (kept for frontend compatibility).
+    state, so this is pure bookkeeping (kept for frontend compatibility)
+    plus recording the authoritative class names for the export.
     """
     session_id = request.get("session_id")
     info = session_manager.get_session(session_id)
     if info is None:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    obj_ids = request.get("obj_ids") or []
+    class_name = request.get("className")
+    if obj_ids and class_name:
+        try:
+            sam2_service.set_class_names(session_id, obj_ids, class_name)
+        except Exception as e:
+            logger.warning(f"set_class_names failed: {e}")
 
     info.touch()
     return {"session_id": session_id, "confirmed": True}
@@ -636,6 +667,59 @@ async def get_mask(session_id: str, frame_idx: int):
 
     info.touch()
     return {"frame_index": frame_idx, "obj_ids": obj_ids, "mask_png": mask_png}
+
+
+@app.post("/api/export/{session_id}")
+async def start_export(session_id: str):
+    """Start the background three-artifact export to the output directory.
+
+    Writes under ``output/<video>_<session8>/``:
+    - masks/00000.png ...  grayscale masks, pixel value == tracklet id
+      (objects absent from a frame simply have no pixels there)
+    - annotated.mp4             original frames + colored mask overlay
+      (H.264, playable in browsers)
+    - annotation.json           per-frame object ids and pixel boxes
+      (frames list only the objects present in that frame)
+
+    Idempotent: a call while an export is running returns its progress.
+    Returns the current status snapshot (polled via /status).
+    """
+    info = session_manager.get_session(session_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if info.is_propagating:
+        raise HTTPException(status_code=409, detail="跟踪进行中，请等跟踪完成后再导出")
+
+    try:
+        status = await sam2_service.start_export(
+            session_id=session_id,
+            output_root=str(OUTPUT_DIR),
+            frames_dir=info.frames_dir,
+            num_frames=info.num_frames,
+            fps=info.video_fps,
+            video_filename=info.video_filename,
+            touch=info.touch,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    info.touch()
+    return {"session_id": session_id, **status}
+
+
+@app.get("/api/export/{session_id}/status")
+async def export_status(session_id: str):
+    """Progress of the session's background export task.
+
+    Returns {running, progress, frames_done, total_frames,
+    output_dir, last_error}.
+    """
+    info = session_manager.get_session(session_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"session_id": session_id, **sam2_service.get_export_status(session_id)}
 
 
 @app.get("/api/export/{session_id}")

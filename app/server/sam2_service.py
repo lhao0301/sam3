@@ -21,8 +21,16 @@ Key differences from the v1 detection-path service:
 """
 
 import asyncio
+import json
+import os
+import re
+import shutil
+import subprocess
+import threading
+import uuid
 from contextlib import contextmanager
-from typing import AsyncIterator, Dict, List, Optional
+from pathlib import Path
+from typing import AsyncIterator, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
@@ -64,6 +72,77 @@ def _masks_to_boxes_xywh(masks: np.ndarray, height: int, width: int) -> List[Lis
         y1 = float(ys.max() + 1) / height
         boxes.append([x0, y0, x1 - x0, y1 - y0])
     return boxes
+
+
+def _sanitize_stem(filename: str) -> str:
+    """Filesystem-safe directory stem (CJK characters are kept)."""
+    stem = Path(filename or "").stem
+    stem = re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", stem).strip().strip(".")
+    return stem[:60]
+
+
+class _ExportVideoWriter:
+    """Annotated-video writer producing browser-playable H.264.
+
+    cv2's "mp4v" fourcc encodes MPEG-4 Part 2, which browser <video> tags
+    (hence the in-IDE preview) cannot decode — only H.264 plays reliably.
+    When ffmpeg with libx264 is on PATH, raw BGR frames are piped through
+    it; the cv2 writer remains as a fallback so exports never hard-fail.
+    """
+
+    def __init__(self, path: str, fps: float, w: int, h: int):
+        self._proc = None
+        self._cv2_writer = None
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            cmd = [
+                ffmpeg, "-y", "-loglevel", "error",
+                "-f", "rawvideo", "-pix_fmt", "bgr24",
+                "-s", f"{w}x{h}", "-r", f"{fps:g}", "-i", "-",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                # H.264 yuv420p requires even dimensions
+                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                str(path),
+            ]
+            try:
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+            except OSError:
+                self._proc = None
+        if self._proc is None:
+            import cv2
+
+            writer = cv2.VideoWriter(
+                str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h)
+            )
+            if not writer.isOpened():
+                raise RuntimeError("Failed to open VideoWriter for export")
+            self._cv2_writer = writer
+
+    def write(self, frame: np.ndarray) -> None:
+        if self._proc is not None:
+            self._proc.stdin.write(np.ascontiguousarray(frame).tobytes())
+        else:
+            self._cv2_writer.write(frame)
+
+    def release(self) -> None:
+        if self._proc is not None:
+            proc, self._proc = self._proc, None
+            try:
+                proc.stdin.close()
+            except BrokenPipeError:
+                pass
+            err = proc.stderr.read().decode(errors="replace").strip()
+            proc.stderr.close()
+            if proc.wait() != 0:
+                raise RuntimeError(f"ffmpeg encode failed: {err or 'unknown'}")
+        elif self._cv2_writer is not None:
+            self._cv2_writer.release()
 
 
 class Sam2TrackerService:
@@ -108,6 +187,12 @@ class Sam2TrackerService:
         self._states: Dict[str, dict] = {}
         # session_id -> submitted prompt records (for undo / reset replay)
         self._prompt_log: Dict[str, List[dict]] = {}
+        # session_id -> {obj_id: class name} (from prompt add / confirm)
+        self._obj_class_names: Dict[str, Dict[int, str]] = {}
+        # session_id -> running background export task (three artifacts)
+        self._export_tasks: Dict[str, asyncio.Task] = {}
+        # session_id -> export progress snapshot (polled by the frontend)
+        self._export_status: Dict[str, dict] = {}
 
     # ── Session lifecycle ──────────────────────────────────────────────
 
@@ -136,8 +221,15 @@ class Sam2TrackerService:
 
     async def close_session(self, session_id: str) -> None:
         """Drop the inference state and prompt log, freeing GPU memory."""
+        # A still-running export should have been awaited (and on timeout
+        # cancelled) by the caller; cancel defensively in case it was not.
+        task = self._export_tasks.pop(session_id, None)
+        if task is not None and not task.done():
+            task.cancel()
         self._states.pop(session_id, None)
         self._prompt_log.pop(session_id, None)
+        self._obj_class_names.pop(session_id, None)
+        self._export_status.pop(session_id, None)
         await asyncio.to_thread(torch.cuda.empty_cache)
         logger.info(f"Closed SAM2-task session {session_id}")
 
@@ -162,6 +254,7 @@ class Sam2TrackerService:
         points: Optional[List[List[float]]] = None,
         point_labels: Optional[List[int]] = None,
         box: Optional[List[float]] = None,
+        class_name: Optional[str] = None,
     ) -> Dict:
         """Add a point / box / point+box prompt for ``obj_id`` on one frame.
 
@@ -217,12 +310,30 @@ class Sam2TrackerService:
                 "box": list(box) if box else None,
             }
         )
+        # Latest class name submission wins (the confirm endpoint may
+        # override it later with the authoritative input value)
+        if class_name:
+            self._obj_class_names.setdefault(session_id, {})[obj_id] = class_name
         logger.info(
             f"Added prompt to session {session_id[:8]}: obj {obj_id} "
             f"on frame {frame_idx} ({len(points or [])} point(s)"
             f"{', box' if box is not None else ''})"
         )
         return self._format_outputs(state, frame_idx, obj_ids, video_res_masks)
+
+    def set_class_names(
+        self, session_id: str, obj_ids: List[int], class_name: str
+    ) -> None:
+        """Record the authoritative class name for confirmed objects.
+
+        Called by the prompt confirm endpoint: the class input value at
+        confirmation time overrides whatever was sent with the preview.
+        """
+        if not class_name or not obj_ids:
+            return
+        names = self._obj_class_names.setdefault(session_id, {})
+        for oid in obj_ids:
+            names[int(oid)] = class_name
 
     async def undo_prompt(self, session_id: str, obj_id: int, frame_idx: int) -> Dict:
         """Undo the latest submission of ``obj_id`` on ``frame_idx``.
@@ -271,6 +382,7 @@ class Sam2TrackerService:
                 last_frame = rec["frame_idx"]
         self._prompt_log[session_id] = [r for r in log if r["obj_id"] != obj_id]
         log = self._prompt_log[session_id]
+        self._obj_class_names.get(session_id, {}).pop(obj_id, None)
 
         def _remove():
             if obj_id not in state["obj_id_to_idx"]:
@@ -662,6 +774,341 @@ class Sam2TrackerService:
 
     # ── Export ─────────────────────────────────────────────────────────
 
+    def get_export_status(self, session_id: str) -> Dict:
+        """Progress snapshot of the session's background export task."""
+        st = self._export_status.get(session_id)
+        if st is None:
+            return {
+                "running": False,
+                "progress": 0.0,
+                "frames_done": 0,
+                "total_frames": 0,
+                "output_dir": None,
+                "last_error": None,
+            }
+        return dict(st)
+
+    async def start_export(
+        self,
+        session_id: str,
+        output_root: str,
+        frames_dir: str,
+        num_frames: int,
+        fps: float,
+        video_filename: str = "",
+        touch: Optional[Callable[[], None]] = None,
+    ) -> Dict:
+        """Kick off the background three-artifact export (idempotent).
+
+        Writes masks/ (grayscale PNGs whose pixel values equal the
+        tracklet ids), annotated.mp4 (mask-composited H.264 video,
+        playable in browsers) and annotation.json (per-frame object
+        boxes) under ``<output_root>/<video>_<session8>/``. A repeated
+        call while the task is running just returns its current status.
+
+        Raises KeyError when the session is unknown and ValueError when
+        there is nothing to export yet.
+        """
+        state = self._get_state(session_id)
+        if not self._prompt_log.get(session_id) or not state["obj_ids"]:
+            raise ValueError("没有已确认的目标，无法导出")
+
+        task = self._export_tasks.get(session_id)
+        if task is not None and not task.done():
+            return self.get_export_status(session_id)
+
+        self._export_status[session_id] = {
+            "running": True,
+            "progress": 0.0,
+            "frames_done": 0,
+            "total_frames": num_frames,
+            "output_dir": None,
+            "last_error": None,
+        }
+        self._export_tasks[session_id] = asyncio.create_task(
+            self._export_worker(
+                session_id, output_root, frames_dir, num_frames, fps,
+                video_filename, touch,
+            )
+        )
+        return self.get_export_status(session_id)
+
+    async def wait_export(self, session_id: str, timeout: float = 60.0) -> None:
+        """Wait for a running export to finish (session close path).
+
+        On timeout the task is cancelled; the worker thread stops at
+        the next frame boundary and cleans its temp directory itself.
+        """
+        task = self._export_tasks.get(session_id)
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.TimeoutError:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        except Exception:
+            pass  # export failure is already recorded in its status dict
+
+    async def _export_worker(
+        self,
+        session_id: str,
+        output_root: str,
+        frames_dir: str,
+        num_frames: int,
+        fps: float,
+        video_filename: str,
+        touch: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Own the export task lifecycle and mirror progress into status."""
+        status = self._export_status[session_id]
+        stop_event = threading.Event()
+        try:
+            async with self._semaphore:
+                output_dir = await asyncio.to_thread(
+                    self._run_export_sync,
+                    session_id, output_root, frames_dir, num_frames, fps,
+                    video_filename, status, stop_event, touch,
+                )
+            status.update(
+                running=False, progress=1.0, output_dir=output_dir,
+                last_error=None,
+            )
+            logger.info(
+                f"Export finished for session {session_id[:8]} -> {output_dir} "
+                f"({status['frames_done']} frames)"
+            )
+        except asyncio.CancelledError:
+            # Interrupted await: signal the sync thread to stop at the next
+            # frame boundary (it cleans its temp dir itself), then swallow
+            # the cancellation so close paths keep working.
+            stop_event.set()
+            status.update(running=False, last_error="导出已取消")
+            logger.info(f"Export cancelled for session {session_id[:8]}")
+        except Exception as e:
+            status.update(running=False, last_error=f"{type(e).__name__}: {e}")
+            logger.error(
+                f"Export failed for session {session_id[:8]}: "
+                f"{type(e).__name__}: {e}"
+            )
+        finally:
+            self._export_tasks.pop(session_id, None)
+
+    def _run_export_sync(
+        self,
+        session_id: str,
+        output_root: str,
+        frames_dir: str,
+        num_frames: int,
+        fps: float,
+        video_filename: str,
+        status: dict,
+        stop_event: threading.Event,
+        touch: Optional[Callable[[], None]] = None,
+    ) -> str:
+        """Single pass over all frames writing the three export artifacts.
+
+        Runs in a worker thread (caller holds the inference semaphore):
+        for every frame it reads the tracked masks at original resolution
+        and writes 1) a grayscale mask PNG whose pixel values equal the
+        tracklet ids (0 = background), 2) a JSON entry with per-object
+        tight boxes in absolute pixel coordinates and 3) the
+        mask-composited video frame. Everything is built inside a temp
+        directory that atomically replaces the final one on success, so
+        the output dir never holds a half-written export.
+        """
+        import cv2
+
+        state = self._get_state(session_id)
+        obj_ids_all = [int(o) for o in state["obj_ids"]]
+        if any(o < 0 or o > 65535 for o in obj_ids_all):
+            raise ValueError("obj id 必须在 0..65535 范围内才能编码进 mask PNG")
+        if 0 in obj_ids_all:
+            logger.warning(
+                f"Session {session_id[:8]}: obj id 0 与 mask 背景值相同，"
+                "其区域在导出的 mask 中不可见"
+            )
+        # 8-bit PNGs hold ids up to 255; wider id ranges upgrade to 16-bit
+        mask_dtype = np.uint8 if max(obj_ids_all) <= 255 else np.uint16
+        class_names = self._obj_class_names.get(session_id, {})
+
+        root = Path(output_root)
+        root.mkdir(parents=True, exist_ok=True)
+        dir_name = f"{_sanitize_stem(video_filename) or 'video'}_{session_id[:8]}"
+        final_dir = root / dir_name
+        tmp_dir = root / f".tmp_{dir_name}_{uuid.uuid4().hex[:6]}"
+        mask_dir = tmp_dir / "masks"
+
+        try:
+            mask_dir.mkdir(parents=True)
+            first_frame = cv2.imread(str(Path(frames_dir) / "00000.jpg"))
+            if first_frame is None:
+                raise RuntimeError("Cannot read first frame for export")
+            h, w = first_frame.shape[:2]
+
+            writer = _ExportVideoWriter(
+                str(tmp_dir / "annotated.mp4"),
+                float(fps) if fps and fps > 0 else 30.0,
+                w,
+                h,
+            )
+
+            frames_json = []
+            try:
+                for frame_idx in range(num_frames):
+                    if stop_event.is_set():
+                        raise RuntimeError("cancelled")
+                    frame = cv2.imread(
+                        str(Path(frames_dir) / f"{frame_idx:05d}.jpg")
+                    )
+                    if frame is None:
+                        frame = np.zeros((h, w, 3), dtype=np.uint8)
+
+                    # Frames without tracked results still get an all-zero
+                    # mask PNG so masks/ aligns 1:1 with the video frames
+                    label_map = np.zeros((h, w), dtype=mask_dtype)
+                    entry = {"frame_idx": frame_idx, "objects": []}
+                    boxes_to_draw = []
+
+                    out, obj_ids = self._read_frame_output(state, frame_idx)
+                    if out is not None:
+                        with _bf16():
+                            _, video_res = self._tracker._get_orig_video_res_output(
+                                state, out["pred_masks"]
+                            )
+                        masks = (video_res > 0.0).cpu().numpy()[:, 0]
+                        frame = self._composite_masks_on_frame(frame, obj_ids, masks)
+                        for oid, m in zip(obj_ids, masks):
+                            oid = int(oid)
+                            if m.shape != (h, w):
+                                m = cv2.resize(
+                                    m.astype(np.uint8), (w, h),
+                                    interpolation=cv2.INTER_NEAREST,
+                                ).astype(bool)
+                            label_map[m] = oid
+                            # JSON entries only for objects present in this
+                            # frame (non-empty mask): an absent object has no
+                            # box, and [0,0,0,0] would read as "box at the
+                            # origin". The mask PNGs still encode absence
+                            # naturally (no pixels carry that id).
+                            if not m.any():
+                                continue
+                            obj_entry = self._mask_box_entry(
+                                oid, m, class_names.get(oid, "default")
+                            )
+                            entry["objects"].append(obj_entry)
+                            boxes_to_draw.append((oid, obj_entry["bbox_xyxy"]))
+
+                    # Boxes drawn on the video are the very same xyxy values
+                    # written to annotation.json, so the mp4 and the JSON
+                    # always agree
+                    if boxes_to_draw:
+                        frame = self._draw_boxes_on_frame(frame, boxes_to_draw)
+
+                    cv2.imwrite(str(mask_dir / f"{frame_idx:05d}.png"), label_map)
+                    writer.write(frame)
+                    frames_json.append(entry)
+
+                    status["frames_done"] = frame_idx + 1
+                    status["progress"] = round((frame_idx + 1) / num_frames, 4)
+                    if touch is not None:
+                        touch()  # keep the session alive while exporting
+            finally:
+                writer.release()
+
+            payload = {
+                "video_filename": video_filename,
+                "session_id": session_id,
+                "num_frames": num_frames,
+                "width": int(w),
+                "height": int(h),
+                "fps": float(fps) if fps and fps > 0 else 30.0,
+                "objects": [
+                    {"id": oid, "class": class_names.get(oid, "default")}
+                    for oid in sorted(obj_ids_all)
+                ],
+                "frames": frames_json,
+            }
+            with open(tmp_dir / "annotation.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+
+            # Atomic swap: rename old aside, move new in, then delete old
+            if final_dir.exists():
+                trash = root / f".trash_{dir_name}_{uuid.uuid4().hex[:6]}"
+                os.rename(final_dir, trash)
+                os.rename(tmp_dir, final_dir)
+                shutil.rmtree(trash, ignore_errors=True)
+            else:
+                os.rename(tmp_dir, final_dir)
+            return str(final_dir)
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+
+    @staticmethod
+    def _draw_boxes_on_frame(frame: np.ndarray, boxes) -> np.ndarray:
+        """Draw tight per-object boxes (same xyxy as in annotation.json)."""
+        import cv2
+
+        from .mask_utils import get_color_for_obj_id
+
+        for oid, (x0, y0, x1, y1) in boxes:
+            color = get_color_for_obj_id(int(oid))
+            cv2.rectangle(
+                frame, (x0, y0), (x1 - 1, y1 - 1), color, 3, cv2.LINE_AA
+            )
+        return frame
+
+    @staticmethod
+    def _composite_masks_on_frame(
+        frame: np.ndarray, obj_ids, masks
+    ) -> np.ndarray:
+        """Blend 50% colored masks plus 2px contours onto a BGR frame."""
+        import cv2
+
+        from .mask_utils import get_color_for_obj_id
+
+        h, w = frame.shape[:2]
+        fitted = []
+        mask_layer = np.zeros((h, w, 3), dtype=np.uint8)
+        for oid, m in zip(obj_ids, masks):
+            if m.shape != (h, w):
+                m = cv2.resize(
+                    m.astype(np.uint8), (w, h),
+                    interpolation=cv2.INTER_NEAREST,
+                ).astype(bool)
+            fitted.append((oid, m))
+            mask_layer[m] = get_color_for_obj_id(int(oid))
+        frame = cv2.addWeighted(frame, 1.0, mask_layer, 0.5, 0)
+        for oid, m in fitted:
+            color = get_color_for_obj_id(int(oid))
+            contours, _ = cv2.findContours(
+                m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(frame, contours, -1, color, 2)
+        return frame
+
+    @staticmethod
+    def _mask_box_entry(obj_id: int, mask: np.ndarray, class_name: str) -> Dict:
+        """JSON entry (absolute pixel xyxy tight box) for one mask."""
+        ys, xs = np.nonzero(mask)
+        if len(ys) == 0:
+            x0 = y0 = x1 = y1 = 0
+        else:
+            x0, x1 = int(xs.min()), int(xs.max()) + 1
+            y0, y1 = int(ys.min()), int(ys.max()) + 1
+        return {
+            "id": obj_id,
+            "class": class_name,
+            "bbox_xyxy": [x0, y0, x1, y1],
+        }
+
     async def export_video(
         self,
         session_id: str,
@@ -670,11 +1117,7 @@ class Sam2TrackerService:
         fps: float = 30.0,
     ) -> str:
         """Export the annotated video with mask overlays composited."""
-        from pathlib import Path
-
         import cv2
-
-        from .mask_utils import get_color_for_obj_id
 
         state = self._get_state(session_id)
 
@@ -688,10 +1131,7 @@ class Sam2TrackerService:
                 raise RuntimeError("Cannot read first frame for export")
             h, w = first_frame.shape[:2]
 
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(str(output_path), fourcc, fps, (w, h))
-            if not writer.isOpened():
-                raise RuntimeError("Failed to open VideoWriter for export")
+            writer = _ExportVideoWriter(str(output_path), float(fps), w, h)
 
             written = 0
             for frame_idx in range(num_frames):
@@ -706,29 +1146,23 @@ class Sam2TrackerService:
                             state, out["pred_masks"]
                         )
                     masks = (video_res > 0.0).cpu().numpy()[:, 0]
-                    mask_layer = np.zeros((h, w, 3), dtype=np.uint8)
+                    frame = self._composite_masks_on_frame(frame, obj_ids, masks)
+                    # Draw the same tight xyxy boxes the three-artifact
+                    # export writes to annotation.json
+                    boxes = []
                     for oid, m in zip(obj_ids, masks):
+                        oid = int(oid)
                         if m.shape != (h, w):
                             m = cv2.resize(
                                 m.astype(np.uint8), (w, h),
                                 interpolation=cv2.INTER_NEAREST,
                             ).astype(bool)
-                        color = get_color_for_obj_id(int(oid))
-                        mask_layer[m] = color
-                    frame = cv2.addWeighted(frame, 1.0, mask_layer, 0.5, 0)
-                    for oid, m in zip(obj_ids, masks):
-                        if m.shape != (h, w):
-                            m = cv2.resize(
-                                m.astype(np.uint8), (w, h),
-                                interpolation=cv2.INTER_NEAREST,
-                            ).astype(bool)
-                        color = get_color_for_obj_id(int(oid))
-                        contours, _ = cv2.findContours(
-                            m.astype(np.uint8),
-                            cv2.RETR_EXTERNAL,
-                            cv2.CHAIN_APPROX_SIMPLE,
-                        )
-                        cv2.drawContours(frame, contours, -1, color, 2)
+                        if m.any():
+                            boxes.append(
+                                (oid, self._mask_box_entry(oid, m, "")["bbox_xyxy"])
+                            )
+                    if boxes:
+                        frame = self._draw_boxes_on_frame(frame, boxes)
 
                 writer.write(frame)
                 written += 1

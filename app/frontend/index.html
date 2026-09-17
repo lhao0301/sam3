@@ -73,6 +73,7 @@
                 <button id="btn-propagate" type="button" class="btn btn-success" disabled data-tip="将已确认的目标传播跟踪到整个视频">开始跟踪</button>
                 <button id="btn-cancel" type="button" class="btn btn-danger" disabled data-tip="取消正在进行的跟踪任务">取消</button>
                 <button id="btn-reset-tracking" type="button" class="btn" disabled data-tip="清除跟踪结果并保留已提交提示；传播后想新增目标时先点这里">↺ 重置跟踪</button>
+                <button id="btn-export" type="button" class="btn" disabled data-tip="导出到服务器 output/ 目录：mask 序列（像素值=trackid）+ 带 mask 视频 + JSON（帧号/目标/box）">⬇ 导出</button>
                 <div class="prop-progress">
                     <div id="propagation-progress" class="progress-bar">
                         <div id="progress-fill" class="progress-fill"></div>
@@ -155,6 +156,6 @@
     <script src="/static/js/prompt-canvas.js?v=6"></script>
     <script src="/static/js/mask-overlay.js?v=5"></script>
     <script src="/static/js/log-terminal.js?v=3"></script>
-    <script src="/static/js/app.js?v=21"></script>
+    <script src="/static/js/app.js?v=22"></script>
 </body>
 </html>

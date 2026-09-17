@@ -41,6 +41,7 @@ class SessionInfo:
     orig_height: int
     orig_width: int
     video_fps: float = 30.0
+    video_filename: str = ""  # original name, used by the export naming
     created_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
     est_gpu_mem_mb: float = 0.0
@@ -85,6 +86,7 @@ class SessionManager:
         orig_height: int,
         orig_width: int,
         video_fps: float = 30.0,
+        video_filename: str = "",
     ) -> str:
         """Create a new session and return its ID.
 
@@ -119,6 +121,7 @@ class SessionManager:
             orig_height=orig_height,
             orig_width=orig_width,
             video_fps=video_fps,
+            video_filename=video_filename,
             est_gpu_mem_mb=num_frames * EST_MEM_PER_FRAME_MB,
         )
         self._sessions[session_id] = info
