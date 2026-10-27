@@ -174,3 +174,10 @@ test.mp4
 app/REFACTOR_PROMPT.md
 SAM3_算法能力与模式说明.md
 monitor.sh
+
+# video post-processing experiment scripts (local-only, not part of the annotation tool)
+scripts/crop_smooth_from_export.py
+scripts/fill_mask_gaps_sam3.py
+scripts/pasteback_sr.py
+scripts/render_stable_crop.py
+scripts/reverse_video.py
