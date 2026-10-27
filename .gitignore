@@ -167,6 +167,8 @@ output/
 # Local hand-annotation test video (never publish)
 无悔追踪-4_x1.534_t2v_ref.mp4
 test.mp4
+# video post-processing test artifacts (480p→720p CRF20 experiments)
+*_480to720*.mp4
 
 # Internal docs and one-off debug scripts
 app/REFACTOR_PROMPT.md
