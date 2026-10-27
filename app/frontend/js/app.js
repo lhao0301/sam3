@@ -517,6 +517,13 @@ class AnnotationApp {
             this.promptCanvas.clearPending();
             this._renderTrackletList();
 
+            // A new session must not inherit the previous video's cached
+            // masks (the cache is keyed by frame index only) nor its
+            // propagation progress readout
+            this.maskOverlay.reset();
+            this.els.progressText.textContent = "0 / 0";
+            this.els.progressFill.style.width = "0%";
+
             // Initialize player
             this.player.initSession(
                 this.sessionId,
